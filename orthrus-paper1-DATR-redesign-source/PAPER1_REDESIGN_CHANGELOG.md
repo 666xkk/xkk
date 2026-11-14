@@ -10,6 +10,8 @@
 - Fixed `--run_from_training` timing initialization and CPU memory logging.
 - Added primary five-seed and three-seed ablation launchers.
 - Added environment-variable database credentials to avoid hard-coded secrets.
+- Added detector-seed isolation to task hashes while deliberately sharing the
+  same preprocessing artifacts across seeds.
 - Added focused unit tests and a protocol log summarizer.
 
 No empirical improvement is claimed by the code change alone. The included

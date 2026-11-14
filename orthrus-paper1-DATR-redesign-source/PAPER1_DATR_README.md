@@ -27,6 +27,8 @@ DATR changes the scientific question from "which test epoch is best?" to
 5. **Conditional robust scoring.** Validation-only median/IQR statistics remove
    intrinsic edge-type difficulty before node aggregation. This is label-free
    and must be ablated separately from the training objective.
+6. **Seed isolation.** Detector seeds receive distinct training/testing paths,
+   while graph construction and edge embeddings are intentionally shared.
 
 The method does **not** guarantee improved MCC. Its falsifiable hypothesis is:
 tail-aligned benign training reduces false positives without sacrificing too

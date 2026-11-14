@@ -389,6 +389,11 @@ def set_task_paths(cfg):
 
                clean_hash_args = ["".join([c for c in str(restart_value) if c not in set(" []\"\'")]) for restart_value in restart_values]
                final_hash_string = ",".join(clean_hash_args)
+               # Detector seeds must never overwrite each other's checkpoints.
+               # Preprocessing remains shared deliberately: all detector seeds
+               # receive exactly the same graphs and edge embeddings.
+               if subtask_name == "gnn_training" and subtask_cfg.use_seed:
+                    final_hash_string += f",detector_seed={cfg._seed}"
                final_hash_string = hashlib.sha256(final_hash_string.encode("utf-8")).hexdigest()
                
                subtask_to_hash[subtask_name] = final_hash_string
