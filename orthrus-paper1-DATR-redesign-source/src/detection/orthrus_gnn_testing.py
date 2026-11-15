@@ -84,6 +84,11 @@ def test(
                     "epistemic_uncertainty",
                     "epistemic_evidence",
                     "consensus_score",
+                    "prototype_divergence",
+                    "prototype_evidence",
+                    "virtual_unknown_probability",
+                    "virtual_unknown_evidence",
+                    "trace_open_score",
                 ):
                     temp_dic[key] = float(trace_components[key][i])
                 temp_dic["temporal_valid"] = bool(

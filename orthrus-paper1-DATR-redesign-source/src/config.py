@@ -111,6 +111,11 @@ TASK_ARGS = {
                          "stats_start_epoch": int,
                          "min_scale": float,
                     },
+                    "trace_open": {
+                         "enabled": bool,
+                         "exposure_weight": float,
+                         "prototype_momentum": float,
+                    },
                },
                "encoder": {
                     "use_node_type_in_node_feats": bool,

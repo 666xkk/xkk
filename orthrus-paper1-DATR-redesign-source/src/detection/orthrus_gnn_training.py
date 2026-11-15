@@ -37,6 +37,35 @@ def train(data,
     return np.mean(losses)
 
 
+@torch.no_grad()
+def calibrate_trace_state(model, train_data, full_data, cfg, device):
+    """Rebuild TRACE statistics for the fixed EMA model using training only."""
+    model.eval()
+    if model.trace_open_enabled:
+        model.trace_open_prototypes.reset()
+
+    phases = ["prototypes", "moments"] if model.trace_open_enabled else ["moments"]
+    for phase in phases:
+        if phase == "moments":
+            model.reset_trace_statistics()
+        if isinstance(model.encoder, OrthrusEncoder):
+            model.encoder.reset_state()
+        model.reset_trace_temporal_state()
+        model.trace_calibration_phase = phase
+        model.trace_update_statistics = True
+        for graph in train_data:
+            graph.to(device=device)
+            for batch in batch_loader_factory(cfg, graph, model.graph_reindexer):
+                model(batch, full_data, inference=True)
+            graph.to("cpu")
+    model.trace_update_statistics = False
+    model.trace_calibration_phase = None
+    log(
+        "[trace-calibration] rebuilt fixed-EMA training-only "
+        f"statistics; phases={','.join(phases)}"
+    )
+
+
 def main(cfg):
     gnn_models_dir = cfg.detection.gnn_training._trained_models_dir
     os.makedirs(gnn_models_dir, exist_ok=True)
@@ -51,6 +80,8 @@ def main(cfg):
     model = build_model(data_sample=train_data[0], device=device, cfg=cfg, max_node_num=max_node_num)
 
     alignment = cfg.detection.gnn_training.alignment
+    if alignment.trace_open.enabled and not alignment.trace.enabled:
+        raise ValueError("TRACE-Open requires alignment.trace.enabled=true")
     enabled_methods = sum([
         bool(alignment.enabled),
         bool(alignment.uncertainty.enabled),
@@ -77,6 +108,13 @@ def main(cfg):
             f"temporal_weight={alignment.trace.temporal_weight}, "
             f"stats_start_epoch={alignment.trace.stats_start_epoch}"
         )
+        if alignment.trace_open.enabled:
+            log(
+                "[trace-open-config] "
+                f"exposure_weight={alignment.trace_open.exposure_weight}, "
+                f"prototype_momentum={alignment.trace_open.prototype_momentum}, "
+                "intervention=type_preserving_endpoint_context"
+            )
     if alignment.enabled:
         counts = torch.zeros(cfg.dataset.num_edge_types, dtype=torch.long)
         for graph in train_data:
@@ -152,6 +190,13 @@ def main(cfg):
                 f"uncertainty={stats.get('uncertainty', float('nan')):.4f}, "
                 f"temporal_coverage={stats.get('valid_temporal_fraction', float('nan')):.4f}"
             )
+            if alignment.trace_open.enabled:
+                log(
+                    f"[trace-open] Epoch {epoch:02d}, "
+                    f"exposure={stats.get('open_exposure', float('nan')):.4f}, "
+                    f"prototype_divergence={stats.get('prototype_divergence', float('nan')):.4f}, "
+                    f"unknown_probability={stats.get('unknown_probability', float('nan')):.4f}"
+                )
         
         epoch_times.append(timer() - start)
         
@@ -189,6 +234,8 @@ def main(cfg):
     # as epoch N+1 so the existing testing/evaluation pipeline can consume it.
     if ema is not None and ema.num_updates > 0 and alignment.save_ema_checkpoint:
         ema.apply(model)
+        if alignment.trace.enabled:
+            calibrate_trace_state(model, train_data, full_data, cfg, device)
         ema_path = os.path.join(gnn_models_dir, f"model_epoch_{num_epochs + 1}")
         save_model(model, ema_path)
         ema.restore(model)

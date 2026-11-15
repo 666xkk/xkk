@@ -72,6 +72,12 @@ detection:
         temporal_weight: 0.10
         stats_start_epoch: 5
         min_scale: 0.001
+      # TRACE-Open: attack-label-free, type-preserving virtual exposure and
+      # full prediction-distribution prototypes. Requires trace.enabled=true.
+      trace_open:
+        enabled: False
+        exposure_weight: 0.25
+        prototype_momentum: 0.95
     encoder:
       use_node_type_in_node_feats: True
       neighbor_sampling: []

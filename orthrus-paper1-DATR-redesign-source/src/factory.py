@@ -10,6 +10,7 @@ from data_utils import *
 from temporal import LastAggregator, LastNeighborLoader
 from objectives import DetectionAlignedObjective
 from trace_views import EntityCrossViewDecoder, TemporalGapDecoder
+from open_set import OpenSetExposureHead, RelationalPrototypeBank
 
 
 def build_model(data_sample, device, cfg, max_node_num):
@@ -33,6 +34,7 @@ def build_model(data_sample, device, cfg, max_node_num):
 def model_factory(encoder, decoders, cfg, in_dim, graph_reindexer, device, max_node_num):
     aligned = cfg.detection.gnn_training.alignment
     trace = aligned.trace
+    trace_open = aligned.trace_open
     return Orthrus(
         encoder=encoder,
         decoders=decoders,
@@ -68,6 +70,21 @@ def model_factory(encoder, decoders, cfg, in_dim, graph_reindexer, device, max_n
         trace_entity_weight=trace.entity_weight,
         trace_temporal_weight=trace.temporal_weight,
         trace_min_scale=trace.min_scale,
+        trace_open_enabled=trace_open.enabled,
+        trace_open_head=(
+            OpenSetExposureHead(
+                cfg.detection.gnn_training.node_out_dim,
+                cfg.dataset.num_edge_types,
+            ) if trace_open.enabled else None
+        ),
+        trace_open_prototypes=(
+            RelationalPrototypeBank(
+                cfg.dataset.num_edge_types,
+                momentum=trace_open.prototype_momentum,
+            ) if trace_open.enabled else None
+        ),
+        trace_open_exposure_weight=trace_open.exposure_weight,
+        trace_open_num_node_types=cfg.dataset.num_node_types,
     ).to(device)
 
 def encoder_factory(cfg, msg_dim, in_dim, edge_dim, graph_reindexer, device, max_node_num):
@@ -164,6 +181,11 @@ def decoder_factory(cfg, in_dim, device, max_node_num):
                 raise ValueError("TRACE bootstrap_keep_probability must be in (0, 1]")
             if trace.enabled and (trace.entity_weight < 0.0 or trace.temporal_weight < 0.0):
                 raise ValueError("TRACE view weights must be non-negative")
+            trace_open = alignment.trace_open
+            if trace_open.enabled and trace_open.exposure_weight < 0.0:
+                raise ValueError("TRACE-Open exposure_weight must be non-negative")
+            if trace_open.enabled and not 0.0 <= trace_open.prototype_momentum < 1.0:
+                raise ValueError("TRACE-Open prototype_momentum must be in [0, 1)")
             decoders.extend([decoder])
             for _ in range(1, num_heads):
                 decoders.append(

@@ -37,6 +37,39 @@ confirmed-alert, and review queues without changing the primary binary metric.
 - TrustedDualMemory does not update model parameters. Automatic adaptation is
   prohibited until contamination and catastrophic-forgetting tests pass.
 
+## TRACE-Open extension after the DATR falsification
+
+The fixed-EMA DATR experiment underperformed its matched baseline and the
+tail-only diagnostic reproduced the baseline (MCC 0.2100 on seed 0). We
+therefore reject unconditional high-loss tail optimization rather than tuning
+it further. TRACE-Open addresses a different hypothesis informed by recent
+TIFS work on open-world inter-class relationships and provenance-level APT
+generation:
+
+1. a dedicated classifier reserves one virtual-unknown class;
+2. normal events update full prediction-distribution prototypes for each
+   relation, instead of reducing novelty to entropy or disagreement;
+3. virtual unknowns are type-preserving endpoint/context interventions inside
+   a causal batch, requiring no attack labels, CTI, ATT&CK policy, or test data;
+4. the primary score requires agreement between two of three independent
+   mechanisms: TRACE consensus, prototype divergence, and virtual-unknown
+   probability. Ensemble disagreement remains review routing only.
+
+After the final EMA weights are installed, prototypes and running moments are
+rebuilt from the training split only (prototype pass, then moment pass). This
+prevents a hidden mismatch between non-EMA training statistics and the fixed
+EMA model used at test time; validation and test labels are never consulted.
+
+This implementation deliberately does **not** claim to synthesize complete APT
+chains. TAGAPT-style stage generation and CrossHound-style host/network fusion
+are outside the present code and must not appear as implemented contributions.
+
+Run `scripts/run_trace_open_screen.sh` for seed 0. Continue only if the matched
+fixed-EMA baseline is improved by at least 0.02 MCC, AP does not fall by more
+than 0.02 absolute, prototype and virtual-unknown evidence are non-degenerate,
+and benign cold-start review volume remains bounded. Otherwise reject the
+TRACE-Open hypothesis before any multi-seed run.
+
 ## Evidence required for a CCF-A submission
 
 At minimum: multiple datasets, paired five-seed intervals, leave-one-campaign-
