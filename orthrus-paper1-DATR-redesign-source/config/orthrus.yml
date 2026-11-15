@@ -105,6 +105,10 @@ detection:
     # Use "all" only for an explicitly labelled oracle/sensitivity analysis.
     checkpoint_policy: ema_only
     checkpoint_last_k: 5
+    # validation_loss evaluates every lightweight epoch on validation, keeps a
+    # manifest, then tests only the selected epoch. Non-selected raw validation
+    # CSVs are redundant once their aggregate loss is recorded.
+    retain_validation_candidates: False
   evaluation:
     viz_malicious_nodes: False
     ground_truth_version: darpa

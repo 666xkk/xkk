@@ -262,6 +262,14 @@ def load_model(model, path: str, neigh_loader: bool=True):
         torch.load(os.path.join(path, "state_dict.pkl")))
     
     if neigh_loader and isinstance(model.encoder, OrthrusEncoder):
-        model.encoder.neighbor_loader = torch.load(os.path.join(path, "neighbor_loader.pkl"))
+        checkpoint_loader = os.path.join(path, "neighbor_loader.pkl")
+        shared_loader = os.path.join(os.path.dirname(path), "shared_neighbor_loader.pkl")
+        loader_path = checkpoint_loader if os.path.exists(checkpoint_loader) else shared_loader
+        if not os.path.exists(loader_path):
+            raise FileNotFoundError(
+                f"neighbor loader missing for {path}; checked {checkpoint_loader} "
+                f"and {shared_loader}"
+            )
+        model.encoder.neighbor_loader = torch.load(loader_path)
 
     return model

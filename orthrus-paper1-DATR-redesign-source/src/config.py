@@ -147,6 +147,7 @@ TASK_ARGS = {
                "threshold_method": str,
                "checkpoint_policy": str,
                "checkpoint_last_k": int,
+               "retain_validation_candidates": bool,
           },
           "evaluation": {
                "viz_malicious_nodes": bool,

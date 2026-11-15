@@ -2,6 +2,7 @@ import os
 import wandb
 import numpy as np
 import csv
+import pandas as pd
 from collections import defaultdict
 from pprint import pprint
 
@@ -54,6 +55,31 @@ def standard_evaluation(cfg, evaluation_fn):
     if selection == "test_mcc_oracle":
         selected = best_stats
         label = "test_mcc_oracle"
+    elif selection == "validation_loss":
+        manifest = os.path.join(
+            cfg.detection.gnn_testing._edge_losses_dir,
+            "validation_selection.csv",
+        )
+        frame = pd.read_csv(manifest)
+        selected_mask = frame["selected"].map(
+            lambda value: str(value).strip().lower() in ("true", "1")
+        )
+        chosen = frame.loc[selected_mask]
+        if len(chosen) != 1:
+            raise RuntimeError(
+                f"validation selection manifest must contain one selected row; found {len(chosen)}"
+            )
+        selected_epoch = int(chosen.iloc[0]["epoch"])
+        matches = [s for s in all_stats if s["epoch"] == selected_epoch]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"validation-selected epoch {selected_epoch} has {len(matches)} test results"
+            )
+        selected = matches[0]
+        label = f"validation_loss:model_epoch_{selected_epoch}"
+        selected["validation_mean_event_loss"] = float(
+            chosen.iloc[0]["validation_mean_event_loss"]
+        )
     elif selection in ("fixed_ema", "fixed_epoch"):
         fixed_epoch = (
             cfg.detection.gnn_training.num_epochs + 1

@@ -219,16 +219,30 @@ def main(cfg):
         save_policy = alignment.checkpoint_save_policy
         save_regular = (
             save_policy == "all"
+            or save_policy == "validation_all"
             or (
                 save_policy == "last_k"
                 and epoch > num_epochs - alignment.checkpoint_save_last_k
             )
         )
-        if save_policy not in ("all", "last_k", "ema_only"):
+        if save_policy not in ("all", "validation_all", "last_k", "ema_only"):
             raise ValueError(f"invalid checkpoint_save_policy: {save_policy}")
         if cfg._test_mode or save_regular:
             model_path = os.path.join(gnn_models_dir, f"model_epoch_{epoch}")
-            save_model(model, model_path)
+            # All epochs share the same final training-stream neighbor state.
+            # validation_all stores only per-epoch parameters here and writes
+            # that large state once after training.
+            save_model(model, model_path, neigh_loader=save_policy != "validation_all")
+
+    if alignment.checkpoint_save_policy == "validation_all":
+        if not isinstance(model.encoder, OrthrusEncoder):
+            raise TypeError("validation_all currently requires OrthrusEncoder")
+        shared_loader_path = os.path.join(gnn_models_dir, "shared_neighbor_loader.pkl")
+        torch.save(model.encoder.neighbor_loader, shared_loader_path)
+        log(
+            "[checkpoint] saved one shared neighbor loader for "
+            f"{num_epochs} validation-selectable checkpoints"
+        )
 
     # A pre-specified, label-free final checkpoint. It is deliberately stored
     # as epoch N+1 so the existing testing/evaluation pipeline can consume it.

@@ -77,3 +77,22 @@ out unknown attacks, temporal and cross-host drift, benign cold start,
 training-data contamination, LoTL/mimicry, detection delay, alert-subgraph
 purity, and runtime/memory comparisons. Code alone is not evidence of venue-
 level novelty or effectiveness.
+
+## Leak-free baseline checkpoint protocol
+
+The fixed final EMA protocol is label-free but empirically weak on CADETS_E3.
+Before testing another detector hypothesis, the baseline must be established by
+standard validation-only model selection. `checkpoint_save_policy=validation_all`
+stores every epoch's parameter state while sharing one large, weight-independent
+neighbor-loader snapshot. `checkpoint_policy=validation_loss` then:
+
+1. computes mean per-event loss for every epoch on validation only;
+2. selects the minimum (earlier epoch breaks an exact tie);
+3. records every candidate in `validation_selection.csv`;
+4. reloads the selected checkpoint and replays validation to reconstruct the
+   causal state; and
+5. evaluates the test split exactly once.
+
+No test label, test MCC, or attack reconstruction output participates in model
+selection. Run `scripts/run_validation_selected_baseline_screen.sh` on seed 0
+before any new detector objective.

@@ -7,6 +7,8 @@ from config import *
 from model import *
 from factory import *
 import torch
+import csv
+import shutil
 
 
 @torch.no_grad()
@@ -97,6 +99,7 @@ def test(
             edge_list.append(temp_dic)
 
         event_count += num_events
+    raw_tot_loss = tot_loss
     tot_loss /= event_count
 
     # Here is a checkpoint, which records all edge losses in the current time window
@@ -110,8 +113,127 @@ def test(
     df = pd.DataFrame(edge_list)
     df.to_csv(csv_file, sep=',', header=True, index=False, encoding='utf-8')
 
+    return raw_tot_loss, event_count
+
     # log(
     #     f'Time: {time_interval}, Loss: {tot_loss:.4f}, Nodes_count: {len(unique_nodes)}, Edges_count: {event_count}, Cost Time: {(end - start):.2f}s')
+
+
+def _epoch_number(name):
+    return int(name.rsplit("_", 1)[-1])
+
+
+def _trained_model_directories(gnn_models_dir):
+    return sorted(
+        [
+            name for name in os.listdir(gnn_models_dir)
+            if name.startswith("model_epoch_")
+            and os.path.isdir(os.path.join(gnn_models_dir, name))
+        ],
+        key=_epoch_number,
+    )
+
+
+def _load_checkpoint(gnn_models_dir, trained_model, data_sample, device, cfg, max_node_num):
+    model = build_model(
+        data_sample=data_sample,
+        device=device,
+        cfg=cfg,
+        max_node_num=max_node_num,
+    )
+    return load_model(model, os.path.join(gnn_models_dir, trained_model))
+
+
+def _run_split(graphs, split, trained_model, model, full_data, nodeid2msg, cfg, device):
+    total_loss = 0.0
+    total_events = 0
+    log(f"    Testing {split} set...")
+    for graph in tqdm(graphs, desc=f"{split} set with {trained_model}"):
+        graph.to(device=device)
+        graph_loss, graph_events = test(
+            data=graph,
+            full_data=full_data,
+            model=model,
+            nodeid2msg=nodeid2msg,
+            split=split,
+            model_epoch_file=trained_model,
+            cfg=cfg,
+            device=device,
+        )
+        total_loss += graph_loss
+        total_events += graph_events
+        graph.to("cpu")
+    return total_loss / max(total_events, 1)
+
+
+def _write_validation_manifest(cfg, rows, selected_model):
+    path = os.path.join(
+        cfg.detection.gnn_testing._edge_losses_dir,
+        "validation_selection.csv",
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["checkpoint", "epoch", "validation_mean_event_loss", "selected"],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({**row, "selected": row["checkpoint"] == selected_model})
+    return path
+
+
+def select_validation_checkpoint(rows):
+    """Select minimum validation loss with an earlier-epoch deterministic tie break."""
+    if not rows:
+        raise ValueError("validation checkpoint candidates are empty")
+    return min(
+        rows,
+        key=lambda row: (row["validation_mean_event_loss"], row["epoch"]),
+    )["checkpoint"]
+
+
+def _validation_select_and_test(
+        cfg, candidates, gnn_models_dir, val_data, test_data, full_data,
+        max_node_num, nodeid2msg, device):
+    rows = []
+    for trained_model in candidates:
+        log(f"Validation selection with model {trained_model}...")
+        torch.cuda.empty_cache()
+        model = _load_checkpoint(
+            gnn_models_dir, trained_model, val_data[0], device, cfg, max_node_num
+        )
+        mean_loss = _run_split(
+            val_data, "val", trained_model, model, full_data, nodeid2msg, cfg, device
+        )
+        rows.append({
+            "checkpoint": trained_model,
+            "epoch": _epoch_number(trained_model),
+            "validation_mean_event_loss": mean_loss,
+        })
+        log(f"[validation-selection] {trained_model} mean_event_loss={mean_loss:.8f}")
+        del model
+
+    selected = select_validation_checkpoint(rows)
+    manifest = _write_validation_manifest(cfg, rows, selected)
+    log(f"[validation-selection] selected {selected}; manifest={manifest}")
+
+    if not cfg.detection.gnn_testing.retain_validation_candidates:
+        val_root = os.path.join(cfg.detection.gnn_testing._edge_losses_dir, "val")
+        for row in rows:
+            if row["checkpoint"] != selected:
+                shutil.rmtree(os.path.join(val_root, row["checkpoint"]), ignore_errors=True)
+        log("[validation-selection] removed non-selected raw validation CSVs")
+
+    # Replay validation on a fresh selected model before testing. ORTHRUS is
+    # stateful, so test must begin with the same causal history as the legacy
+    # val-then-test pipeline. The selected validation CSV is simply overwritten.
+    model = _load_checkpoint(
+        gnn_models_dir, selected, val_data[0], device, cfg, max_node_num
+    )
+    _run_split(val_data, "val", selected, model, full_data, nodeid2msg, cfg, device)
+    _run_split(test_data, "test", selected, model, full_data, nodeid2msg, cfg, device)
+    del model
 
 
 def main(cfg):
@@ -124,7 +246,7 @@ def main(cfg):
 
     # For each model trained at a given epoch, we test
     gnn_models_dir = cfg.detection.gnn_training._trained_models_dir
-    all_trained_models = ["model_epoch_1"] if cfg._from_weights else listdir_sorted(gnn_models_dir)
+    all_trained_models = ["model_epoch_1"] if cfg._from_weights else _trained_model_directories(gnn_models_dir)
     if not cfg._from_weights:
         policy = cfg.detection.gnn_testing.checkpoint_policy
         if policy == "ema_only":
@@ -135,16 +257,38 @@ def main(cfg):
         elif policy == "last_k":
             k = cfg.detection.gnn_testing.checkpoint_last_k
             all_trained_models = all_trained_models[-k:]
+        elif policy == "validation_loss":
+            expected = cfg.detection.gnn_training.num_epochs
+            if len(all_trained_models) != expected:
+                raise RuntimeError(
+                    f"validation_loss requires {expected} epoch checkpoints; "
+                    f"found {len(all_trained_models)}"
+                )
         elif policy != "all":
             raise ValueError(f"invalid checkpoint_policy: {policy}")
 
     device = get_device(cfg)
 
+    if not cfg._from_weights and cfg.detection.gnn_testing.checkpoint_policy == "validation_loss":
+        _validation_select_and_test(
+            cfg=cfg,
+            candidates=all_trained_models,
+            gnn_models_dir=gnn_models_dir,
+            val_data=val_data,
+            test_data=test_data,
+            full_data=full_data,
+            max_node_num=max_node_num,
+            nodeid2msg=nodeid2msg,
+            device=device,
+        )
+        return
+
     for trained_model in all_trained_models:
         log(f"Evaluation with model {trained_model}...")
         torch.cuda.empty_cache()
-        model = build_model(data_sample=test_data[0], device=device, cfg=cfg, max_node_num=max_node_num)
-        model = load_model(model, os.path.join(gnn_models_dir, trained_model))
+        model = _load_checkpoint(
+            gnn_models_dir, trained_model, test_data[0], device, cfg, max_node_num
+        )
         
         if cfg._from_weights:
             model.load_state_dict(torch.load(os.path.join(cfg._from_weights_path, f"{cfg.dataset.name}.pkl")))
@@ -154,20 +298,9 @@ def main(cfg):
             (val_data, "val"),
             (test_data, "test"),
         ]:
-            log(f"    Testing {split} set...")
-            for g in tqdm(graphs, desc=f"{split} set with {trained_model}"):
-                g.to(device=device)
-                test(
-                    data=g,
-                    full_data=full_data,
-                    model=model,
-                    nodeid2msg=nodeid2msg,
-                    split=split,
-                    model_epoch_file=trained_model,
-                    cfg=cfg,
-                    device=device,
-                )
-                g.to("cpu")
+            _run_split(
+                graphs, split, trained_model, model, full_data, nodeid2msg, cfg, device
+            )
 
         del model
 
