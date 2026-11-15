@@ -54,6 +54,26 @@ def test_ema_can_be_applied_and_restored():
     assert torch.allclose(model.weight, torch.full_like(model.weight, 4.0))
 
 
+def test_ema_copies_float_buffers_instead_of_averaging_statistics():
+    class WithStatistic(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([0.0]))
+            self.register_buffer("running_mean", torch.tensor(0.0))
+
+    model = WithStatistic()
+    ema = ModelEMA(model, decay=0.5)
+    model.weight.data.fill_(2.0)
+    model.running_mean.fill_(10.0)
+    ema.update(model)
+    model.weight.data.fill_(4.0)
+    model.running_mean.fill_(30.0)
+    ema.update(model)
+    ema.apply(model)
+    assert torch.allclose(model.weight, torch.tensor([3.0]))
+    assert torch.allclose(model.running_mean, torch.tensor(30.0))
+
+
 def test_conditional_normalization_removes_group_scale():
     normalizer = RobustConditionalNormalizer().fit(
         [1.0, 2.0, 100.0, 200.0], ["common", "common", "rare", "rare"]

@@ -51,10 +51,15 @@ def main(cfg):
     model = build_model(data_sample=train_data[0], device=device, cfg=cfg, max_node_num=max_node_num)
 
     alignment = cfg.detection.gnn_training.alignment
-    if alignment.enabled and alignment.uncertainty.enabled:
+    enabled_methods = sum([
+        bool(alignment.enabled),
+        bool(alignment.uncertainty.enabled),
+        bool(alignment.trace.enabled),
+    ])
+    if enabled_methods > 1:
         raise ValueError(
-            "DATR alignment and ECHO uncertainty are separate hypotheses; "
-            "enable only one so the experiment remains identifiable"
+            "DATR, ECHO, and TRACE are separate hypotheses; enable only one "
+            "so the experiment remains identifiable"
         )
     if alignment.uncertainty.enabled:
         log(
@@ -62,6 +67,15 @@ def main(cfg):
             f"heads={alignment.uncertainty.num_heads}, "
             f"bootstrap_keep={alignment.uncertainty.bootstrap_keep_probability}, "
             f"disagreement_weight={alignment.uncertainty.disagreement_weight}"
+        )
+    if alignment.trace.enabled:
+        log(
+            "[trace-config] "
+            f"heads={alignment.trace.num_heads}, "
+            f"bootstrap_keep={alignment.trace.bootstrap_keep_probability}, "
+            f"entity_weight={alignment.trace.entity_weight}, "
+            f"temporal_weight={alignment.trace.temporal_weight}, "
+            f"stats_start_epoch={alignment.trace.stats_start_epoch}"
         )
     if alignment.enabled:
         counts = torch.zeros(cfg.dataset.num_edge_types, dtype=torch.long)
@@ -89,6 +103,11 @@ def main(cfg):
         # Before each epoch, we reset the memory
         if isinstance(model.encoder, OrthrusEncoder):
             model.encoder.reset_state()
+        if alignment.trace.enabled:
+            model.reset_trace_temporal_state()
+            if epoch == alignment.trace.stats_start_epoch:
+                model.reset_trace_statistics()
+            model.trace_update_statistics = epoch >= alignment.trace.stats_start_epoch
 
         tot_loss = 0
         for g in train_data:
@@ -122,6 +141,16 @@ def main(cfg):
                 f"mean_loss={stats.get('mean_loss', float('nan')):.4f}, "
                 f"mean_disagreement={stats.get('mean_disagreement', float('nan')):.4f}, "
                 f"max_disagreement={stats.get('max_disagreement', float('nan')):.4f}"
+            )
+        if alignment.trace.enabled:
+            stats = model.last_trace_stats
+            log(
+                f"[trace-evidence] Epoch {epoch:02d}, "
+                f"interaction={stats.get('interaction', float('nan')):.4f}, "
+                f"entity={stats.get('entity', float('nan')):.4f}, "
+                f"temporal={stats.get('temporal', float('nan')):.4f}, "
+                f"uncertainty={stats.get('uncertainty', float('nan')):.4f}, "
+                f"temporal_coverage={stats.get('valid_temporal_fraction', float('nan')):.4f}"
             )
         
         epoch_times.append(timer() - start)

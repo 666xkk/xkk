@@ -19,6 +19,34 @@ def _load_validation_losses(val_tw_path):
     return losses, groups
 
 
+def _trace_uncertainty_threshold(val_tw_path, cfg):
+    if not cfg.detection.gnn_training.alignment.trace.enabled:
+        return None
+    node_to_uncertainty = defaultdict(float)
+    for filename in sorted(listdir_sorted(val_tw_path)):
+        frame = pd.read_csv(os.path.join(val_tw_path, filename))
+        if "epistemic_evidence" not in frame:
+            raise ValueError("TRACE evaluation requires epistemic_evidence in testing CSVs")
+        for row in frame[["srcnode", "dstnode", "epistemic_evidence"]].itertuples(index=False):
+            uncertainty = float(row.epistemic_evidence)
+            node_to_uncertainty[int(row.srcnode)] = max(
+                node_to_uncertainty[int(row.srcnode)], uncertainty
+            )
+            if cfg.detection.evaluation.node_evaluation.use_dst_node_loss:
+                node_to_uncertainty[int(row.dstnode)] = max(
+                    node_to_uncertainty[int(row.dstnode)], uncertainty
+                )
+    quantile = cfg.detection.evaluation.node_evaluation.trace_uncertainty_quantile
+    if not 0.0 < quantile < 1.0:
+        raise ValueError("trace_uncertainty_quantile must be in (0, 1)")
+    threshold = float(np.quantile(list(node_to_uncertainty.values()), quantile))
+    log(
+        f"[trace-routing] node-level validation q={quantile:.3f} "
+        f"uncertainty threshold={threshold:.4f}"
+    )
+    return threshold
+
+
 def _fit_normalizer(val_tw_path, cfg):
     mode = cfg.detection.evaluation.node_evaluation.score_normalization
     if mode == "none":
@@ -53,10 +81,12 @@ def get_node_predictions(val_tw_path, test_tw_path, cfg):
         else:
             raise ValueError(f"normalization does not support threshold method: {method}")
     log(f"Threshold: {thr:.3f}")
+    trace_uncertainty_threshold = _trace_uncertainty_threshold(val_tw_path, cfg)
 
     node_to_losses = defaultdict(list)
     node_to_max_loss_tw = {}
     node_to_max_loss = defaultdict(int)
+    node_to_uncertainty = defaultdict(float)
     
     filelist = listdir_sorted(test_tw_path)
     for tw, file in enumerate(tqdm(sorted(filelist), desc="Compute labels")):
@@ -68,6 +98,11 @@ def get_node_predictions(val_tw_path, test_tw_path, cfg):
             loss = line['loss']
             if normalizer is not None:
                 loss = normalizer.transform_one(loss, line['edge_type'])
+            if trace_uncertainty_threshold is not None:
+                uncertainty = float(line["epistemic_evidence"])
+                node_to_uncertainty[srcnode] = max(node_to_uncertainty[srcnode], uncertainty)
+                if cfg.detection.evaluation.node_evaluation.use_dst_node_loss:
+                    node_to_uncertainty[dstnode] = max(node_to_uncertainty[dstnode], uncertainty)
             
             # Scores
             node_to_losses[srcnode].append(loss)
@@ -99,6 +134,17 @@ def get_node_predictions(val_tw_path, test_tw_path, cfg):
         
     if use_kmeans:
         results = compute_kmeans_labels(results, topk_K=cfg.detection.evaluation.node_evaluation.kmeans_top_K)
+
+    if trace_uncertainty_threshold is not None:
+        for node_id, result in results.items():
+            uncertainty = node_to_uncertainty[node_id]
+            result["epistemic_evidence"] = uncertainty
+            if uncertainty > trace_uncertainty_threshold:
+                result["trace_route"] = "review"
+            elif result["y_hat"]:
+                result["trace_route"] = "confirmed_alert"
+            else:
+                result["trace_route"] = "trusted"
         
     return results
 
@@ -153,6 +199,23 @@ def main(val_tw_path, test_tw_path, model_epoch_dir, cfg, tw_to_malicious_nodes,
     
     fp_in_malicious_tw_ratio = analyze_false_positives(y_truth, y_preds, pred_scores, max_val_loss_tw, nodes, tw_to_malicious_nodes)
     stats["fp_in_malicious_tw_ratio"] = fp_in_malicious_tw_ratio
+    if cfg.detection.gnn_training.alignment.trace.enabled:
+        routes = [result["trace_route"] for result in results.values()]
+        malicious = [result for result in results.values() if result["y_true"] == 1]
+        stats["trace_review_rate"] = routes.count("review") / max(len(routes), 1)
+        stats["trace_confirmed_alert_rate"] = routes.count("confirmed_alert") / max(len(routes), 1)
+        stats["trace_trusted_coverage"] = routes.count("trusted") / max(len(routes), 1)
+        stats["trace_malicious_review_recall"] = (
+            sum(result["trace_route"] == "review" for result in malicious)
+            / max(len(malicious), 1)
+        )
+        log(
+            "[trace-routing] "
+            f"review_rate={stats['trace_review_rate']:.4f}, "
+            f"confirmed_alert_rate={stats['trace_confirmed_alert_rate']:.4f}, "
+            f"trusted_coverage={stats['trace_trusted_coverage']:.4f}, "
+            f"malicious_review_recall={stats['trace_malicious_review_recall']:.4f}"
+        )
     
     results_file = os.path.join(out_dir, f"result_{model_epoch_dir}.pth")
     stats_file = os.path.join(out_dir, f"stats_{model_epoch_dir}.pth")

@@ -62,6 +62,16 @@ detection:
         num_heads: 3
         bootstrap_keep_probability: 0.80
         disagreement_weight: 0.50
+      # TRACE: temporally ordered interaction/entity/gap evidence. Uncertainty
+      # is exported separately and never added to the anomaly score.
+      trace:
+        enabled: False
+        num_heads: 3
+        bootstrap_keep_probability: 0.80
+        entity_weight: 0.25
+        temporal_weight: 0.10
+        stats_start_epoch: 5
+        min_scale: 0.001
     encoder:
       use_node_type_in_node_feats: True
       neighbor_sampling: []
@@ -105,6 +115,9 @@ detection:
       # normalizer is retained only for negative-result reproduction.
       score_normalization: none
       normalization_min_scale_ratio: 0.10
+      # Validation-only routing threshold. It does not change the binary score
+      # or read test labels; it separates confirmed alerts from review cases.
+      trace_uncertainty_quantile: 0.99
 
 attack_reconstruction :
   tracing:

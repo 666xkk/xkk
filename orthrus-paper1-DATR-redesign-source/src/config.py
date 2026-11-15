@@ -102,6 +102,15 @@ TASK_ARGS = {
                          "bootstrap_keep_probability": float,
                          "disagreement_weight": float,
                     },
+                    "trace": {
+                         "enabled": bool,
+                         "num_heads": int,
+                         "bootstrap_keep_probability": float,
+                         "entity_weight": float,
+                         "temporal_weight": float,
+                         "stats_start_epoch": int,
+                         "min_scale": float,
+                    },
                },
                "encoder": {
                     "use_node_type_in_node_feats": bool,
@@ -147,6 +156,7 @@ TASK_ARGS = {
                     "kmeans_top_K": int,
                     "score_normalization": str,
                     "normalization_min_scale_ratio": float,
+                    "trace_uncertainty_quantile": float,
                },
           },
      },

@@ -1,5 +1,18 @@
 # Redesign changelog
 
+## TRACE multi-view selective detection
+
+- Repositioned ECHO as an uncertainty component after comparison with recent
+  reconstruction-plus-uncertainty zero-day work.
+- Added causal interaction, cross-endpoint entity, and inter-event-time views.
+- Added training-only running moments and two-of-three evidence consensus.
+- Exported per-event raw losses, standardized evidence, uncertainty and final
+  consensus to testing CSVs.
+- Added validation-only trusted/review/confirmed-alert routing diagnostics.
+- Added a conservative dual memory that quarantines suspicious observations
+  and never updates detector parameters automatically.
+- Preserved state-dict compatibility when TRACE is disabled.
+
 ## ECHO revision after the DATR falsification experiment
 
 - Recorded the five-seed DATR negative result instead of hiding it.

@@ -37,6 +37,11 @@ def test(
         unique_nodes = torch.cat([unique_nodes, batch.edge_index.flatten()]).unique()
 
         each_edge_loss = model(batch, full_data, inference=True)
+        trace_components = (
+            model.last_trace_components
+            if cfg.detection.gnn_training.alignment.trace.enabled
+            else None
+        )
         tot_loss += each_edge_loss.sum().item()
 
         # If the graph has been reindexed in the loader, we retrieve original node IDs
@@ -68,6 +73,22 @@ def test(
                 'edge_type': edge_type,
                 'time': t_var,
             }
+            if trace_components is not None:
+                for key in (
+                    "interaction_loss",
+                    "entity_loss",
+                    "temporal_loss",
+                    "interaction_evidence",
+                    "entity_evidence",
+                    "temporal_evidence",
+                    "epistemic_uncertainty",
+                    "epistemic_evidence",
+                    "consensus_score",
+                ):
+                    temp_dic[key] = float(trace_components[key][i])
+                temp_dic["temporal_valid"] = bool(
+                    trace_components["temporal_valid"][i]
+                )
             edge_list.append(temp_dic)
 
         event_count += num_events

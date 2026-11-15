@@ -34,6 +34,16 @@ class FixedLossHead(torch.nn.Module):
         return self.values
 
 
+class FixedEntityView(torch.nn.Module):
+    def forward(self, **kwargs):
+        return torch.tensor([3.0, 3.0])
+
+
+class FixedTemporalView(torch.nn.Module):
+    def forward(self, **kwargs):
+        return torch.tensor([3.0, 3.0])
+
+
 def test_echo_model_fuses_independent_head_losses_at_inference():
     model = Orthrus(
         encoder=DummyEncoder(),
@@ -88,4 +98,46 @@ def test_disabled_echo_preserves_single_head_score():
     assert torch.allclose(
         model(batch, full_data=None, inference=True),
         torch.tensor([1.0, 2.0]),
+    )
+    assert not any(key.startswith("trace_") for key in model.state_dict())
+
+
+def test_trace_requires_two_view_evidence_and_exports_components():
+    model = Orthrus(
+        encoder=DummyEncoder(),
+        decoders=[FixedLossHead([3.0, 3.0]), FixedLossHead([3.0, 3.0])],
+        num_nodes=3,
+        in_dim=2,
+        out_dim=2,
+        use_contrastive_learning=False,
+        device=torch.device("cpu"),
+        graph_reindexer=None,
+        training_objective=DetectionAlignedObjective(enabled=False),
+        trace_enabled=True,
+        trace_entity_decoder=FixedEntityView(),
+        trace_temporal_decoder=FixedTemporalView(),
+    )
+    for moments in (
+        model.trace_interaction_moments,
+        model.trace_entity_moments,
+        model.trace_temporal_moments,
+        model.trace_uncertainty_moments,
+    ):
+        moments.count.fill_(2)
+        moments.mean.zero_()
+        moments.m2.fill_(2.0)  # population scale = 1
+    batch = SimpleNamespace(
+        x_src=torch.zeros(2, 2),
+        x_dst=torch.zeros(2, 2),
+        edge_index=torch.tensor([[0, 0], [1, 1]]),
+        t=torch.tensor([0, 1_000_000_000]),
+        msg=torch.zeros(2, 1),
+        edge_type=torch.eye(2),
+    )
+    model.eval()
+    score = model(batch, full_data=None, inference=True)
+    assert torch.allclose(score, torch.tensor([3.0, 3.0]))
+    assert model.last_trace_components["temporal_valid"].tolist() == [False, True]
+    assert torch.allclose(
+        model.last_trace_components["epistemic_uncertainty"], torch.zeros(2)
     )

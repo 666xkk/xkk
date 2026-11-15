@@ -142,6 +142,7 @@ class ModelEMA:
         if not 0.0 <= decay < 1.0:
             raise ValueError("ema_decay must be in [0, 1)")
         self.decay = float(decay)
+        self.parameter_names = set(dict(model.named_parameters()))
         self.shadow = {
             name: value.detach().clone()
             for name, value in model.state_dict().items()
@@ -162,9 +163,11 @@ class ModelEMA:
             return
         self.num_updates += 1
         for name, value in state.items():
-            if value.is_floating_point():
+            if name in self.parameter_names and value.is_floating_point():
                 self.shadow[name].mul_(self.decay).add_(value.detach(), alpha=1.0 - self.decay)
             else:
+                # Running statistics and temporal state are buffers, not model
+                # parameters. Averaging them would produce invalid moments.
                 self.shadow[name].copy_(value.detach())
 
     def apply(self, model):

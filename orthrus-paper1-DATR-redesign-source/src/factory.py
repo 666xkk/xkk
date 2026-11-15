@@ -9,6 +9,7 @@ from decoders import *
 from data_utils import *
 from temporal import LastAggregator, LastNeighborLoader
 from objectives import DetectionAlignedObjective
+from trace_views import EntityCrossViewDecoder, TemporalGapDecoder
 
 
 def build_model(data_sample, device, cfg, max_node_num):
@@ -31,6 +32,7 @@ def build_model(data_sample, device, cfg, max_node_num):
 
 def model_factory(encoder, decoders, cfg, in_dim, graph_reindexer, device, max_node_num):
     aligned = cfg.detection.gnn_training.alignment
+    trace = aligned.trace
     return Orthrus(
         encoder=encoder,
         decoders=decoders,
@@ -46,8 +48,26 @@ def model_factory(encoder, decoders, cfg, in_dim, graph_reindexer, device, max_n
             tail_weight=aligned.tail_weight,
         ),
         uncertainty_enabled=aligned.uncertainty.enabled,
-        bootstrap_keep_probability=aligned.uncertainty.bootstrap_keep_probability,
+        bootstrap_keep_probability=(
+            trace.bootstrap_keep_probability
+            if trace.enabled
+            else aligned.uncertainty.bootstrap_keep_probability
+        ),
         disagreement_weight=aligned.uncertainty.disagreement_weight,
+        trace_enabled=trace.enabled,
+        trace_entity_decoder=(
+            EntityCrossViewDecoder(
+                hidden_dim=cfg.detection.gnn_training.node_out_dim,
+                feature_dim=in_dim,
+            ) if trace.enabled else None
+        ),
+        trace_temporal_decoder=(
+            TemporalGapDecoder(cfg.detection.gnn_training.node_out_dim)
+            if trace.enabled else None
+        ),
+        trace_entity_weight=trace.entity_weight,
+        trace_temporal_weight=trace.temporal_weight,
+        trace_min_scale=trace.min_scale,
     ).to(device)
 
 def encoder_factory(cfg, msg_dim, in_dim, edge_dim, graph_reindexer, device, max_node_num):
@@ -123,18 +143,27 @@ def decoder_factory(cfg, in_dim, device, max_node_num):
                 num_layers=cfg.detection.gnn_training.decoder.predict_edge_type.custom.num_layers,
                 activation=activation,
             )
+            alignment = cfg.detection.gnn_training.alignment
+            ensemble_enabled = alignment.uncertainty.enabled or alignment.trace.enabled
             num_heads = (
-                cfg.detection.gnn_training.alignment.uncertainty.num_heads
-                if cfg.detection.gnn_training.alignment.uncertainty.enabled
+                alignment.trace.num_heads
+                if alignment.trace.enabled
+                else alignment.uncertainty.num_heads
+                if alignment.uncertainty.enabled
                 else 1
             )
-            if num_heads < 2 and cfg.detection.gnn_training.alignment.uncertainty.enabled:
-                raise ValueError("uncertainty.num_heads must be at least 2")
+            if num_heads < 2 and ensemble_enabled:
+                raise ValueError("uncertainty/TRACE num_heads must be at least 2")
             uncertainty = cfg.detection.gnn_training.alignment.uncertainty
             if uncertainty.enabled and not 0.0 < uncertainty.bootstrap_keep_probability <= 1.0:
                 raise ValueError("uncertainty.bootstrap_keep_probability must be in (0, 1]")
             if uncertainty.enabled and uncertainty.disagreement_weight < 0.0:
                 raise ValueError("uncertainty.disagreement_weight must be non-negative")
+            trace = alignment.trace
+            if trace.enabled and not 0.0 < trace.bootstrap_keep_probability <= 1.0:
+                raise ValueError("TRACE bootstrap_keep_probability must be in (0, 1]")
+            if trace.enabled and (trace.entity_weight < 0.0 or trace.temporal_weight < 0.0):
+                raise ValueError("TRACE view weights must be non-negative")
             decoders.extend([decoder])
             for _ in range(1, num_heads):
                 decoders.append(

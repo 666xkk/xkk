@@ -1,5 +1,6 @@
 README.md
 PAPER1_ECHO_RESEARCH_PLAN.md
+PAPER1_TRACE_RESEARCH_PLAN.md
 PAPER1_DATR_README.md
 PAPER1_REDESIGN_CHANGELOG.md
 config/orthrus.yml
@@ -8,6 +9,7 @@ src/factory.py
 src/model.py
 src/objectives.py
 src/score_normalization.py
+src/trace_views.py
 src/orthrus.py
 src/detection/orthrus_gnn_training.py
 src/detection/orthrus_gnn_testing.py
@@ -17,5 +19,8 @@ scripts/run_datr_protocol.sh
 scripts/run_datr_ablations.sh
 scripts/summarize_datr.py
 scripts/run_echo_screen.sh
+scripts/run_trace_screen.sh
+scripts/analyze_trace_strata.py
 tests/test_detection_aligned_objective.py
 tests/test_echo_model.py
+tests/test_trace_views.py

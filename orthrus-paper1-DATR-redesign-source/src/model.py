@@ -3,6 +3,9 @@ from config import *
 import torch
 import torch.nn as nn
 
+from objectives import bootstrap_ensemble_risk, uncertainty_fused_score
+from trace_views import RunningMoments, two_of_three_consensus
+
 
 class Orthrus(nn.Module):
     def __init__(self,
@@ -18,6 +21,12 @@ class Orthrus(nn.Module):
             uncertainty_enabled=False,
             bootstrap_keep_probability=0.8,
             disagreement_weight=0.5,
+            trace_enabled=False,
+            trace_entity_decoder=None,
+            trace_temporal_decoder=None,
+            trace_entity_weight=0.25,
+            trace_temporal_weight=0.10,
+            trace_min_scale=1e-3,
         ):
         super(Orthrus, self).__init__()
 
@@ -30,16 +39,86 @@ class Orthrus(nn.Module):
         self.bootstrap_keep_probability = float(bootstrap_keep_probability)
         self.disagreement_weight = float(disagreement_weight)
         self.last_uncertainty_stats = {}
+        self.trace_enabled = bool(trace_enabled)
+        self.trace_entity_decoder = trace_entity_decoder
+        self.trace_temporal_decoder = trace_temporal_decoder
+        self.trace_entity_weight = float(trace_entity_weight)
+        self.trace_temporal_weight = float(trace_temporal_weight)
+        self.trace_update_statistics = False
+        self.last_trace_stats = {}
+        self.last_trace_components = {}
+        if self.trace_enabled:
+            self.trace_interaction_moments = RunningMoments(trace_min_scale)
+            self.trace_entity_moments = RunningMoments(trace_min_scale)
+            self.trace_temporal_moments = RunningMoments(trace_min_scale)
+            self.trace_uncertainty_moments = RunningMoments(trace_min_scale)
+            self.register_buffer(
+                "trace_last_time",
+                torch.full((num_nodes,), -1, dtype=torch.long, device=device),
+                persistent=True,
+            )
+        else:
+            # Keep the disabled model state_dict byte-compatible with the
+            # baseline/ECHO checkpoints created before TRACE existed.
+            self.trace_interaction_moments = None
+            self.trace_entity_moments = None
+            self.trace_temporal_moments = None
+            self.trace_uncertainty_moments = None
+            self.register_buffer(
+                "trace_last_time", torch.empty(0, dtype=torch.long), persistent=False
+            )
         
         self.last_h_storage, self.last_h_non_empty_nodes = None, None
         if self.use_contrastive_learning:
             self.last_h_storage = torch.empty((num_nodes, out_dim), device=device)
             self.last_h_non_empty_nodes = torch.tensor([], dtype=torch.long, device=device)
+
+    def reset_trace_temporal_state(self):
+        self.trace_last_time.fill_(-1)
+
+    def reset_trace_statistics(self):
+        for moments in (
+            self.trace_interaction_moments,
+            self.trace_entity_moments,
+            self.trace_temporal_moments,
+            self.trace_uncertainty_moments,
+        ):
+            moments.reset()
+
+    @torch.no_grad()
+    def _trace_temporal_targets(self, edge_index, timestamps):
+        """Compute causal endpoint gaps without looking at future events."""
+        src_cpu = edge_index[0].detach().cpu().tolist()
+        dst_cpu = edge_index[1].detach().cpu().tolist()
+        time_cpu = timestamps.detach().long().cpu().tolist()
+        unique_nodes = torch.unique(edge_index).long()
+        prior_values = self.trace_last_time[unique_nodes].detach().cpu().tolist()
+        state = dict(zip(unique_nodes.detach().cpu().tolist(), prior_values))
+        gaps, valid = [], []
+        for src, dst, now in zip(src_cpu, dst_cpu, time_cpu):
+            previous = max(int(state[src]), int(state[dst]))
+            is_valid = previous >= 0 and now >= previous
+            gap_seconds = (now - previous) / 1_000_000_000.0 if is_valid else 0.0
+            gaps.append(gap_seconds)
+            valid.append(is_valid)
+            state[src] = now
+            state[dst] = now
+        latest = torch.tensor(
+            [state[node] for node in unique_nodes.detach().cpu().tolist()],
+            dtype=torch.long,
+            device=edge_index.device,
+        )
+        self.trace_last_time[unique_nodes] = latest
+        gap_tensor = torch.tensor(gaps, dtype=torch.float, device=edge_index.device)
+        valid_tensor = torch.tensor(valid, dtype=torch.bool, device=edge_index.device)
+        return torch.log1p(gap_tensor), valid_tensor
         
     def forward(self, batch, full_data, inference=False):
         train_mode = not inference
         x = (batch.x_src, batch.x_dst)
         edge_index = batch.edge_index
+        if self.trace_enabled:
+            log_gap, valid_gap = self._trace_temporal_targets(edge_index, batch.t)
 
         with torch.set_grad_enabled(train_mode):
             h = self.encoder(
@@ -88,9 +167,74 @@ class Orthrus(nn.Module):
 
             head_losses = torch.stack(per_head, dim=0)
 
-            if self.uncertainty_enabled:
-                from objectives import bootstrap_ensemble_risk, uncertainty_fused_score
+            if self.trace_enabled:
+                interaction = head_losses.mean(dim=0)
+                uncertainty = head_losses.std(dim=0, unbiased=False)
+                entity = self.trace_entity_decoder(
+                    h_src=h_src,
+                    h_dst=h_dst,
+                    x_src=x[0],
+                    x_dst=x[1],
+                )
+                temporal = self.trace_temporal_decoder(
+                    h_src=h_src,
+                    h_dst=h_dst,
+                    log_gap=log_gap,
+                    valid=valid_gap,
+                )
 
+                if train_mode:
+                    if self.trace_update_statistics:
+                        self.trace_interaction_moments.update(interaction)
+                        self.trace_entity_moments.update(entity)
+                        self.trace_temporal_moments.update(temporal[valid_gap])
+                        self.trace_uncertainty_moments.update(uncertainty)
+                    interaction_risk = bootstrap_ensemble_risk(
+                        head_losses,
+                        keep_probability=self.bootstrap_keep_probability,
+                    )
+                    entity_risk = entity.mean()
+                    temporal_risk = (
+                        temporal[valid_gap].mean()
+                        if valid_gap.any()
+                        else temporal.sum() * 0.0
+                    )
+                    self.last_trace_stats = {
+                        "interaction": float(interaction_risk.detach()),
+                        "entity": float(entity_risk.detach()),
+                        "temporal": float(temporal_risk.detach()),
+                        "uncertainty": float(uncertainty.mean().detach()),
+                        "valid_temporal_fraction": float(valid_gap.float().mean().detach()),
+                    }
+                    return (
+                        interaction_risk
+                        + self.trace_entity_weight * entity_risk
+                        + self.trace_temporal_weight * temporal_risk
+                    )
+
+                interaction_z = self.trace_interaction_moments.positive_z(interaction)
+                entity_z = self.trace_entity_moments.positive_z(entity)
+                temporal_z = self.trace_temporal_moments.positive_z(temporal)
+                temporal_z = torch.where(valid_gap, temporal_z, torch.zeros_like(temporal_z))
+                uncertainty_z = self.trace_uncertainty_moments.positive_z(uncertainty)
+                consensus = two_of_three_consensus(
+                    interaction_z, entity_z, temporal_z
+                )
+                self.last_trace_components = {
+                    "interaction_loss": interaction.detach(),
+                    "entity_loss": entity.detach(),
+                    "temporal_loss": temporal.detach(),
+                    "interaction_evidence": interaction_z.detach(),
+                    "entity_evidence": entity_z.detach(),
+                    "temporal_evidence": temporal_z.detach(),
+                    "epistemic_uncertainty": uncertainty.detach(),
+                    "epistemic_evidence": uncertainty_z.detach(),
+                    "temporal_valid": valid_gap.detach(),
+                    "consensus_score": consensus.detach(),
+                }
+                return consensus
+
+            if self.uncertainty_enabled:
                 disagreement = head_losses.std(dim=0, unbiased=False)
                 self.last_uncertainty_stats = {
                     "mean_loss": float(head_losses.mean().detach()),
