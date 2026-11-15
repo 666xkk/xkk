@@ -39,10 +39,10 @@ detection:
     weight_decay: 0.00001
     node_hid_dim: 128
     node_out_dim: 64
-    # Detection-Aligned Tail Risk (DATR). Disable this block to reproduce the
-    # original mean-cross-entropy baseline exactly.
+    # Experimental objectives are opt-in. The safe default reproduces mean
+    # cross entropy; ECHO/DATR must be enabled explicitly by a run command.
     alignment:
-      enabled: True
+      enabled: False
       tail_fraction: 0.10
       tail_weight: 0.50
       class_balance_beta: 0.999
@@ -55,6 +55,13 @@ detection:
       # "all" is reserved for an explicitly labelled oracle experiment.
       checkpoint_save_policy: ema_only
       checkpoint_save_last_k: 5
+      # ECHO: shared temporal encoder with bootstrapped semantic heads.  The
+      # disagreement term estimates epistemic novelty without attack labels.
+      uncertainty:
+        enabled: False
+        num_heads: 3
+        bootstrap_keep_probability: 0.80
+        disagreement_weight: 0.50
     encoder:
       use_node_type_in_node_feats: True
       neighbor_sampling: []
@@ -94,8 +101,9 @@ detection:
       use_dst_node_loss: True
       use_kmeans: True
       kmeans_top_K: 20
-      # Remove benign edge-type difficulty using validation data only.
-      score_normalization: edge_type_robust
+      # Keep raw ORTHRUS scores by default. The earlier edge-type robust
+      # normalizer is retained only for negative-result reproduction.
+      score_normalization: none
       normalization_min_scale_ratio: 0.10
 
 attack_reconstruction :

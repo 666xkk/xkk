@@ -45,6 +45,9 @@ def model_factory(encoder, decoders, cfg, in_dim, graph_reindexer, device, max_n
             tail_fraction=aligned.tail_fraction,
             tail_weight=aligned.tail_weight,
         ),
+        uncertainty_enabled=aligned.uncertainty.enabled,
+        bootstrap_keep_probability=aligned.uncertainty.bootstrap_keep_probability,
+        disagreement_weight=aligned.uncertainty.disagreement_weight,
     ).to(device)
 
 def encoder_factory(cfg, msg_dim, in_dim, edge_dim, graph_reindexer, device, max_node_num):
@@ -120,7 +123,32 @@ def decoder_factory(cfg, in_dim, device, max_node_num):
                 num_layers=cfg.detection.gnn_training.decoder.predict_edge_type.custom.num_layers,
                 activation=activation,
             )
-            decoders.append(decoder)
+            num_heads = (
+                cfg.detection.gnn_training.alignment.uncertainty.num_heads
+                if cfg.detection.gnn_training.alignment.uncertainty.enabled
+                else 1
+            )
+            if num_heads < 2 and cfg.detection.gnn_training.alignment.uncertainty.enabled:
+                raise ValueError("uncertainty.num_heads must be at least 2")
+            uncertainty = cfg.detection.gnn_training.alignment.uncertainty
+            if uncertainty.enabled and not 0.0 < uncertainty.bootstrap_keep_probability <= 1.0:
+                raise ValueError("uncertainty.bootstrap_keep_probability must be in (0, 1]")
+            if uncertainty.enabled and uncertainty.disagreement_weight < 0.0:
+                raise ValueError("uncertainty.disagreement_weight must be non-negative")
+            decoders.extend([decoder])
+            for _ in range(1, num_heads):
+                decoders.append(
+                    EdgeTypeDecoder(
+                        in_dim=node_out_dim,
+                        num_edge_types=cfg.dataset.num_edge_types,
+                        loss_fn=loss_fn,
+                        dropout=cfg.detection.gnn_training.decoder.predict_edge_type.custom.dropout,
+                        num_layers=cfg.detection.gnn_training.decoder.predict_edge_type.custom.num_layers,
+                        activation=activation_fn_factory(
+                            cfg.detection.gnn_training.decoder.predict_edge_type.custom.activation
+                        ),
+                    )
+                )
         
         else:
             raise ValueError(f"Invalid decoder {method}")

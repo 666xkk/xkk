@@ -14,6 +14,49 @@ import torch
 import torch.nn as nn
 
 
+def bootstrap_ensemble_risk(head_losses, keep_probability=0.8):
+    """Return a bootstrap risk for a stack of per-event head losses.
+
+    Each semantic head sees an independent Bernoulli sub-sample.  The temporal
+    encoder remains shared, so this is substantially cheaper than training a
+    full deep ensemble while preserving the head diversity needed for an
+    epistemic signal.  At least one event is retained for every head.
+    """
+    if head_losses.ndim != 2 or head_losses.numel() == 0:
+        raise ValueError("head_losses must have shape [num_heads, num_events]")
+    if not 0.0 < keep_probability <= 1.0:
+        raise ValueError("bootstrap_keep_probability must be in (0, 1]")
+
+    risks = []
+    for losses in head_losses:
+        if keep_probability == 1.0:
+            selected = losses
+        else:
+            mask = torch.rand_like(losses) < keep_probability
+            if not mask.any():
+                mask[torch.randint(losses.numel(), (1,), device=losses.device)] = True
+            selected = losses[mask]
+        risks.append(selected.mean())
+    return torch.stack(risks).mean()
+
+
+def uncertainty_fused_score(head_losses, disagreement_weight=0.5):
+    """Fuse reconstruction surprisal and epistemic head disagreement.
+
+    The first term is the ordinary ORTHRUS edge reconstruction loss.  The
+    second is the population standard deviation across independently
+    bootstrapped heads.  Setting ``disagreement_weight=0`` recovers the mean
+    ensemble reconstruction score exactly.
+    """
+    if head_losses.ndim != 2 or head_losses.numel() == 0:
+        raise ValueError("head_losses must have shape [num_heads, num_events]")
+    if disagreement_weight < 0.0:
+        raise ValueError("disagreement_weight must be non-negative")
+    mean = head_losses.mean(dim=0)
+    disagreement = head_losses.std(dim=0, unbiased=False)
+    return mean + float(disagreement_weight) * disagreement
+
+
 def effective_number_weights(counts, beta=0.999, max_weight=10.0):
     """Return normalized class weights using the effective-number estimator."""
     counts = torch.as_tensor(counts, dtype=torch.float)

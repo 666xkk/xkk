@@ -1,4 +1,5 @@
 README.md
+PAPER1_ECHO_RESEARCH_PLAN.md
 PAPER1_DATR_README.md
 PAPER1_REDESIGN_CHANGELOG.md
 config/orthrus.yml
@@ -15,4 +16,6 @@ src/detection/node_evaluation.py
 scripts/run_datr_protocol.sh
 scripts/run_datr_ablations.sh
 scripts/summarize_datr.py
+scripts/run_echo_screen.sh
 tests/test_detection_aligned_objective.py
+tests/test_echo_model.py

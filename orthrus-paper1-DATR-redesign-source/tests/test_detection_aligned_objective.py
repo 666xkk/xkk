@@ -6,7 +6,13 @@ import torch
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from objectives import DetectionAlignedObjective, ModelEMA, effective_number_weights
+from objectives import (
+    DetectionAlignedObjective,
+    ModelEMA,
+    bootstrap_ensemble_risk,
+    effective_number_weights,
+    uncertainty_fused_score,
+)
 from score_normalization import RobustConditionalNormalizer
 
 
@@ -55,3 +61,28 @@ def test_conditional_normalization_removes_group_scale():
     transformed = normalizer.transform([1.5, 150.0], ["common", "rare"])
     assert abs(transformed[0]) < 1e-6
     assert abs(transformed[1]) < 1e-6
+
+
+def test_uncertainty_fusion_is_eventwise_mean_plus_disagreement():
+    losses = torch.tensor([[1.0, 2.0], [1.0, 4.0], [1.0, 6.0]])
+    score = uncertainty_fused_score(losses, disagreement_weight=0.5)
+    expected = losses.mean(dim=0) + 0.5 * losses.std(dim=0, unbiased=False)
+    assert torch.allclose(score, expected)
+    assert score[0] == 1.0
+    assert score[1] > losses[:, 1].mean()
+
+
+def test_zero_disagreement_weight_recovers_mean_ensemble_score():
+    losses = torch.tensor([[1.0, 3.0], [2.0, 5.0]])
+    assert torch.allclose(
+        uncertainty_fused_score(losses, disagreement_weight=0.0),
+        losses.mean(dim=0),
+    )
+
+
+def test_full_keep_bootstrap_is_mean_over_all_heads_and_events():
+    losses = torch.tensor([[1.0, 3.0], [2.0, 6.0]])
+    assert torch.allclose(
+        bootstrap_ensemble_risk(losses, keep_probability=1.0),
+        losses.mean(),
+    )

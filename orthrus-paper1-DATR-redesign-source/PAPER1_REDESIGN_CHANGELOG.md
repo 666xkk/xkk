@@ -1,5 +1,19 @@
 # Redesign changelog
 
+## ECHO revision after the DATR falsification experiment
+
+- Recorded the five-seed DATR negative result instead of hiding it.
+- Added an opt-in, shared-encoder bootstrap ensemble (`ECHO`) that separates
+  mean reconstruction surprisal from semantic-head disagreement.
+- Added a bootstrap training risk and an uncertainty-fused inference score.
+- Added unit tests for fusion and exact baseline-recovery invariants.
+- Added a seed-0 screening script with explicit stage gates; five-seed runs are
+  not justified until a candidate clears the screen.
+- Changed defaults back to mean CE and raw scores. Failed DATR components are
+  no longer silently active.
+
+## Initial DATR redesign
+
 - Added `DetectionAlignedObjective`: class-balanced mean/CVaR training risk.
 - Added label-free EMA checkpointing with initialization-bias correction.
 - Added checkpoint save/test policies to avoid 20 redundant large snapshots.

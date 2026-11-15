@@ -1,5 +1,6 @@
 from provnet_utils import *
 from config import *
+import torch
 import torch.nn as nn
 
 
@@ -14,6 +15,9 @@ class Orthrus(nn.Module):
             device,
             graph_reindexer,
             training_objective,
+            uncertainty_enabled=False,
+            bootstrap_keep_probability=0.8,
+            disagreement_weight=0.5,
         ):
         super(Orthrus, self).__init__()
 
@@ -22,6 +26,10 @@ class Orthrus(nn.Module):
         self.use_contrastive_learning = use_contrastive_learning
         self.graph_reindexer = graph_reindexer
         self.training_objective = training_objective
+        self.uncertainty_enabled = bool(uncertainty_enabled)
+        self.bootstrap_keep_probability = float(bootstrap_keep_probability)
+        self.disagreement_weight = float(disagreement_weight)
+        self.last_uncertainty_stats = {}
         
         self.last_h_storage, self.last_h_non_empty_nodes = None, None
         if self.use_contrastive_learning:
@@ -59,10 +67,7 @@ class Orthrus(nn.Module):
                 self.last_h_non_empty_nodes = torch.cat([involved_nodes, self.last_h_non_empty_nodes]).unique()
             
             # Train mode: loss | Inference mode: edge scores
-            loss_or_scores = torch.zeros(
-                edge_index.shape[1], dtype=torch.float, device=h_src.device
-            )
-            
+            per_head = []
             for decoder in self.decoders:
                 loss = decoder(
                     h_src=h_src,
@@ -74,9 +79,35 @@ class Orthrus(nn.Module):
                     last_h_storage=self.last_h_storage,
                     last_h_non_empty_nodes=self.last_h_non_empty_nodes,
                 )
-                if loss.numel() != loss_or_scores.numel():
-                    raise TypeError(f"Shapes of loss/score do not match ({loss.numel()} vs {loss_or_scores.numel()})")
-                loss_or_scores = loss_or_scores + loss
+                if loss.numel() != edge_index.shape[1]:
+                    raise TypeError(
+                        f"Shapes of loss/score do not match "
+                        f"({loss.numel()} vs {edge_index.shape[1]})"
+                    )
+                per_head.append(loss)
+
+            head_losses = torch.stack(per_head, dim=0)
+
+            if self.uncertainty_enabled:
+                from objectives import bootstrap_ensemble_risk, uncertainty_fused_score
+
+                disagreement = head_losses.std(dim=0, unbiased=False)
+                self.last_uncertainty_stats = {
+                    "mean_loss": float(head_losses.mean().detach()),
+                    "mean_disagreement": float(disagreement.mean().detach()),
+                    "max_disagreement": float(disagreement.max().detach()),
+                }
+                if train_mode:
+                    return bootstrap_ensemble_risk(
+                        head_losses,
+                        keep_probability=self.bootstrap_keep_probability,
+                    )
+                return uncertainty_fused_score(
+                    head_losses,
+                    disagreement_weight=self.disagreement_weight,
+                )
+
+            loss_or_scores = head_losses.sum(dim=0)
 
             if train_mode:
                 return self.training_objective(loss_or_scores, batch.edge_type)

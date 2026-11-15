@@ -96,6 +96,12 @@ TASK_ARGS = {
                     "save_ema_checkpoint": bool,
                     "checkpoint_save_policy": str,
                     "checkpoint_save_last_k": int,
+                    "uncertainty": {
+                         "enabled": bool,
+                         "num_heads": int,
+                         "bootstrap_keep_probability": float,
+                         "disagreement_weight": float,
+                    },
                },
                "encoder": {
                     "use_node_type_in_node_feats": bool,
