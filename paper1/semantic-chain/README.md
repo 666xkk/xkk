@@ -39,3 +39,11 @@ ClearScope and then reproduced on THEIA before implementation.
 Causal-incident release: `orthrus-causal-incident-aggregation-20261117.tar.gz`
 
 SHA-256: `5e86251ce6cc97dff0341930f12027f8e49b769bc85a2683520d19035eb57b61`
+
+The frozen-selected replay extension reconstructs a deleted final neighbor
+loader deterministically from the training stream, validates its event offset,
+and replays validation/test for archived selected weights without retraining.
+
+Frozen replay release: `orthrus-frozen-selected-replay-20261117.tar.gz`
+
+SHA-256: `7734b436d5a03dfdc8a48b130ccb7d6541ce93eef8be747714e767cfc7b41577`

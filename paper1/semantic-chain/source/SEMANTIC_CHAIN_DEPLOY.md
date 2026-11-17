@@ -164,3 +164,22 @@ incident by the mean of its three strongest frozen window scores. Score files
 contain no attack labels. If the input window audit contains labels, episode
 coverage is written separately to `frozen_label_evaluation.csv` after scores
 are frozen.
+
+## Recovering deleted temporal state without retraining
+
+An ORTHRUS selected weight is insufficient by itself because inference also
+requires the final training-stream neighbor loader. That loader is independent
+of gradients: every epoch resets it and inserts each training `src,dst` batch
+in chronological order. The frozen replay tool deterministically reconstructs
+that state, validates the event count, loads an archived selected weight, then
+replays validation before test exactly as the stateful testing pipeline does:
+
+```bash
+python -u scripts/run_frozen_selected_replay.py \
+  --dataset CADETS_E3 \
+  --seed 0 \
+  --weight paper1/results/CADETS_E3/VALIDATION_SELECTED_BASELINE/selected_weights/seed0/model_epoch_20_state_dict.pkl \
+  --output-root paper1/results/CADETS_E3/FROZEN_SELECTED_REPLAY/seed0
+```
+
+It performs no optimizer step and writes no reconstructed loader artifact.
