@@ -31,3 +31,11 @@ frozen for ranking metrics.
 Conditional-tail release: `orthrus-conditional-tail-audit-20261117.tar.gz`
 
 SHA-256: `9e408d84f10dcec75870c6b369f748b57035e5dfe1640aa7ef167548c47cbfff`
+
+The causal-incident extension merges stable collective weak-evidence windows
+into ranked operational incidents. Its fixed aggregation protocol was frozen on
+ClearScope and then reproduced on THEIA before implementation.
+
+Causal-incident release: `orthrus-causal-incident-aggregation-20261117.tar.gz`
+
+SHA-256: `5e86251ce6cc97dff0341930f12027f8e49b769bc85a2683520d19035eb57b61`

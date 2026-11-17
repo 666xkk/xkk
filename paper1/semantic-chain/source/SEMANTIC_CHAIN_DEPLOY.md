@@ -144,3 +144,23 @@ upper-tail p-value using only Day-6 normal telemetry. Incident edge evidence is
 combined per node with the Simes correction, which adjusts for node exposure
 while retaining repeated weak evidence. Test labels are loaded only after
 scores are frozen and are used solely for AP, AUC and fixed-budget recall.
+
+The Simes node audit is retained as a negative-result reproducer. On
+ClearScope it over-corrected the repeated activity of malicious nodes and must
+not be used as the detector score.
+
+## Causal incident aggregation
+
+Frozen scale-4 collective windows can be merged into operational incidents:
+
+```bash
+python -u scripts/build_causal_incidents.py \
+  --window-root paper1/results/CLEARSCOPE_E3/VALIDATION_SELECTED_BASELINE/causal_collective_windows_scale4 \
+  --output-dir paper1/results/CLEARSCOPE_E3/CAUSAL_INCIDENTS
+```
+
+The fixed defaults bridge at most one missing window (`max_gap=2`) and rank an
+incident by the mean of its three strongest frozen window scores. Score files
+contain no attack labels. If the input window audit contains labels, episode
+coverage is written separately to `frozen_label_evaluation.csv` after scores
+are frozen.
