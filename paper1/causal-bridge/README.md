@@ -14,6 +14,8 @@ remains available for controlled ablations.
 - SHA256: `7cf66f7bb449cdf2795cab844019a400d6597dec9e9b60a61c35740959ddbabc`
 - `orthrus-density-gated-causal-bridge-20261117.tar.gz`
 - SHA256: `9831f6f6dcdbf1e32796cb5031d6421ccd9cb35baea361dbfe718dc37f8c91e4`
+- `orthrus-causal-collective-windows-20261117.tar.gz`
+- SHA256: `d77db183f347fcd8cfc7bca8464c24d4cec73f98c5f560b24a466146bfffbdd1`
 
 Extract the archive from the ORTHRUS repository root:
 
@@ -33,3 +35,9 @@ For the revised method, add:
 --density-gate \
 --max-relation-expansion-ratio 1.0
 ```
+
+The collective-window package additionally provides strictly causal
+four-window weak-evidence accumulation over frozen edge-loss CSVs. Historical
+scores are invariant to future-window appends; optional attack intervals are
+used only for post-generation evaluation. See `COLLECTIVE_WINDOW_DEPLOY.md` in
+the archive.
