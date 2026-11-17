@@ -1,6 +1,7 @@
 import math
 import subprocess
 import sys
+import csv
 from pathlib import Path
 
 from src.detection.semantic_chain import (
@@ -19,6 +20,7 @@ from src.detection.semantic_chain import (
     validate_split_intervals,
     validate_chronology,
 )
+from src.detection.semantic_chain_evaluate import read_frozen_rows
 
 
 def event(time, actor, token, sequence=0):
@@ -143,3 +145,22 @@ def test_future_training_day_is_rejected_by_default_protocol():
         assert "non-causal split" in str(error)
     else:
         raise AssertionError("future training relative to test must be rejected")
+
+
+def test_frozen_evaluator_reads_selection_without_rescoring(tmp_path):
+    path = tmp_path / "windows.csv"
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["window_start_ns", "window_end_ns", "semantic_chain_score", "selected_for_review"],
+        )
+        writer.writeheader()
+        writer.writerow({
+            "window_start_ns": 0,
+            "window_end_ns": 10,
+            "semantic_chain_score": 3.5,
+            "selected_for_review": True,
+        })
+    rows = read_frozen_rows(path)
+    assert rows[0]["semantic_chain_score"] == "3.5"
+    assert rows[0]["selected_for_review"] is True

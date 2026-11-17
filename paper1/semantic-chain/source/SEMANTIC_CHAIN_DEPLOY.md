@@ -69,6 +69,15 @@ head -20 paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/window_scores.csv
 head -20 paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/top_evidence.csv
 ```
 
+Only after those scores are frozen, evaluate the known ClearScope interval:
+
+```bash
+python -m src.detection.semantic_chain_evaluate \
+  --window-scores paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/window_scores.csv \
+  --attack-interval '2018-04-11 13:54:00~2018-04-11 14:48:00' \
+  --output paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/frozen_attack_evaluation.json
+```
+
 Do not tune parameters against attack intervals. First compare fixed defaults
 across ClearScope, THEIA and CADETS. Ground-truth attack-window evaluation is a
 separate frozen-score audit.

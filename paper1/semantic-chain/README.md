@@ -9,4 +9,4 @@ and CLEARSCOPE_E3 share the same event and node-table schemas. See
 
 Release: `orthrus-semantic-chain-v1-20261117.tar.gz`
 
-SHA-256: `134707b84b972db5da8523d8c73db00c1aecca9b7557652b3ec90fa0f9c57a97`
+SHA-256: `5a7902d906881bfd5bfd6b6d3ba354ee2a5ac40af0966ca1a1f0976575fef057`
