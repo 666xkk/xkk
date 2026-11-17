@@ -21,4 +21,13 @@ archives remain immutable.
 
 Calibration tools release: `orthrus-day6-calibration-tools-20261117.tar.gz`
 
-SHA-256: `66f2127eaca81ef2d4a38c95773c1a7c166072c33923fd3822ba5909c4aa3517`
+SHA-256: `aa02d800f5a61b57a5ed3633530915195df2b29fcc27bfc31bd2068230145d9e`
+
+The conditional-tail audit converts frozen edge losses to finite-sample,
+event-type-conditioned p-values and combines incident evidence with an
+exposure-corrected Simes node score. Test labels are used only after scores are
+frozen for ranking metrics.
+
+Conditional-tail release: `orthrus-conditional-tail-audit-20261117.tar.gz`
+
+SHA-256: `9e408d84f10dcec75870c6b369f748b57035e5dfe1640aa7ef167548c47cbfff`

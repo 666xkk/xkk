@@ -124,3 +124,23 @@ The inference tool constructs `full_data` in the exact order
 `train + calibration_day6` and rejects the run unless the checkpoint neighbor
 loader's `cur_e_id` equals the number of training edges. It does not train the
 model or run evaluation/tracing.
+
+## Conditional tail audit
+
+The historical ClearScope validation stream omits four test operation types
+and contains only one `EVENT_CONNECT`. Do not use its raw maximum loss as a
+representative operational threshold. After generating frozen Day-6 losses for
+all seeds, run the label-free conditional-tail audit:
+
+```bash
+python -u scripts/audit_conditional_tail.py \
+  --bundle-root paper1/results/CLEARSCOPE_E3/VALIDATION_SELECTED_BASELINE \
+  --calibration-root paper1/results/CLEARSCOPE_E3/DAY6_CALIBRATION_5SEEDS \
+  --output-dir paper1/results/CLEARSCOPE_E3/CONDITIONAL_TAIL_AUDIT
+```
+
+Each edge loss is converted to a finite-sample, event-type-conditioned
+upper-tail p-value using only Day-6 normal telemetry. Incident edge evidence is
+combined per node with the Simes correction, which adjusts for node exposure
+while retaining repeated weak evidence. Test labels are loaded only after
+scores are frozen and are used solely for AP, AUC and fixed-budget recall.
