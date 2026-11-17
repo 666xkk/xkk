@@ -2,7 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.build_calibration_split import ensure_isolated_output
+from scripts.build_calibration_split import (
+    ensure_isolated_output,
+    sort_indexid_messages,
+)
 from scripts.run_calibration_inference import (
     checkpoint_loader_path,
     validate_neighbor_offset,
@@ -14,6 +17,17 @@ def test_calibration_output_cannot_overwrite_standard_splits(tmp_path):
     with pytest.raises(ValueError, match="must not overwrite"):
         ensure_isolated_output(tmp_path / "val", standard)
     ensure_isolated_output(tmp_path / "calibration_day6", standard)
+
+
+def test_node_message_map_rejects_hash_to_id_entries():
+    messages = {
+        2: ["file", "/tmp/b"],
+        1: ["subject", "/bin/a"],
+    }
+    assert list(sort_indexid_messages(messages)) == [1, 2]
+    messages["deadbeef"] = 2
+    with pytest.raises(ValueError, match="integer index IDs"):
+        sort_indexid_messages(messages)
 
 
 def test_neighbor_offset_must_equal_training_event_count():

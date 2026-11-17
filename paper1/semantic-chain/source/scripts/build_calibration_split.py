@@ -14,6 +14,24 @@ def ensure_isolated_output(output_dir: Path, standard_split_dirs: list[Path]) ->
         raise ValueError("calibration output must not overwrite train/val/test")
 
 
+def sort_indexid_messages(indexid2msg: dict) -> dict:
+    """Validate and sort the node-message map expected by get_indexid2vec."""
+    invalid = [
+        key
+        for key, value in indexid2msg.items()
+        if not isinstance(key, int)
+        or not isinstance(value, (list, tuple))
+        or len(value) != 2
+    ]
+    if invalid:
+        sample = repr(invalid[0])
+        raise ValueError(
+            "node-message map must contain only integer index IDs mapped to "
+            f"[node_type, message]; invalid key example: {sample}"
+        )
+    return dict(sorted(indexid2msg.items(), key=lambda item: item[0]))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="CLEARSCOPE_E3")
@@ -36,7 +54,7 @@ def main() -> None:
         get_indexid2vec,
     )
     from provnet_utils import (
-        gen_nodeid2msg,
+        get_indexid2msg,
         get_logger,
         init_database_connection,
         ntype2id,
@@ -75,11 +93,19 @@ def main() -> None:
 
     cursor, connection = init_database_connection(cfg)
     try:
-        indexid2msg = gen_nodeid2msg(cursor, use_cmd=use_cmd, use_port=use_port)
+        # Match the repository's normal edge-embedding path. gen_nodeid2msg
+        # also contains hash-id -> integer-id entries, while get_indexid2msg
+        # contains only integer-id -> [node_type, message] entries accepted by
+        # get_indexid2vec.
+        indexid2msg = get_indexid2msg(
+            cursor,
+            use_cmd=use_cmd,
+            use_port=use_port,
+        )
     finally:
         cursor.close()
         connection.close()
-    indexid2msg = dict(sorted(indexid2msg.items(), key=lambda item: int(item[0])))
+    indexid2msg = sort_indexid_messages(indexid2msg)
     model_path = (
         Path(cfg.edge_featurization.embed_nodes.feature_word2vec._model_dir)
         / "feature_word2vec.model"
