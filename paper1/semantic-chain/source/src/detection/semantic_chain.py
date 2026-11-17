@@ -50,11 +50,12 @@ class CanonicalEvent:
 class SemanticChainConfig:
     backoff_strength: float = 5.0
     additive_alpha: float = 0.1
-    actor_decay_minutes: float = 60.0
     window_minutes: float = 15.0
     actor_top_k: int = 10
+    actor_motif_top_k: int = 3
     review_budget: int = 20
     calibration_reservoir: int = 50_000
+    min_operation_calibration: int = 100
     minimum_scale: float = 0.25
     evidence_top_n: int = 200
 
@@ -62,11 +63,12 @@ class SemanticChainConfig:
         positive = {
             "backoff_strength": self.backoff_strength,
             "additive_alpha": self.additive_alpha,
-            "actor_decay_minutes": self.actor_decay_minutes,
             "window_minutes": self.window_minutes,
             "actor_top_k": self.actor_top_k,
+            "actor_motif_top_k": self.actor_motif_top_k,
             "review_budget": self.review_budget,
             "calibration_reservoir": self.calibration_reservoir,
+            "min_operation_calibration": self.min_operation_calibration,
             "minimum_scale": self.minimum_scale,
             "evidence_top_n": self.evidence_top_n,
         }
@@ -313,8 +315,24 @@ def calibrate_model(
     return result
 
 
-def standardized_excess(value: float, operation: str, calibration: Mapping[str, RobustLocationScale]) -> float:
-    stats = calibration.get(operation, calibration["__GLOBAL__"])
+def calibration_for_operation(
+    operation: str,
+    calibration: Mapping[str, RobustLocationScale],
+    minimum_samples: int,
+) -> RobustLocationScale:
+    candidate = calibration.get(operation)
+    if candidate is None or candidate.samples < minimum_samples:
+        return calibration["__GLOBAL__"]
+    return candidate
+
+
+def standardized_excess(
+    value: float,
+    operation: str,
+    calibration: Mapping[str, RobustLocationScale],
+    minimum_samples: int = 100,
+) -> float:
+    stats = calibration_for_operation(operation, calibration, minimum_samples)
     return max(0.0, (float(value) - stats.median) / stats.scale)
 
 
@@ -328,60 +346,104 @@ def score_events(
     calibration: Mapping[str, RobustLocationScale],
     config: SemanticChainConfig,
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
-    """Score a stream without updating the learned normal model."""
+    """Score a stream using distinct actor-motif evidence per window.
+
+    Repetition of the same actor/token pair cannot increase its contribution:
+    only the pair's maximum standardized excess is retained.  This prevents a
+    high-rate benign loop from masquerading as a semantic causal chain.
+    """
     histories: MutableMapping[Tuple[int, int], deque[Token]] = defaultdict(lambda: deque(maxlen=2))
-    actor_state: Dict[Tuple[int, int], Tuple[int, float]] = {}
-    windows: Dict[int, Dict[Tuple[int, int], float]] = defaultdict(dict)
-    top_evidence: List[Tuple[float, int, int, Dict[str, object]]] = []
+    # window -> actor -> token -> (excess, surprisal, timestamp, object)
+    windows: Dict[
+        int,
+        Dict[Tuple[int, int], Dict[Token, Tuple[float, float, int, int]]],
+    ] = defaultdict(lambda: defaultdict(dict))
+    event_counts: Counter[int] = Counter()
     window_ns = int(config.window_minutes * 60 * 1e9)
-    decay_ns = config.actor_decay_minutes * 60 * 1e9
-    serial = 0
 
     for event in events:
         actor_key = (event.sequence, event.actor_id)
         history = histories[actor_key]
         raw = model.surprisal(event.token, history)
-        excess = standardized_excess(raw, event.operation, calibration)
-        previous_time, previous_value = actor_state.get(actor_key, (event.timestamp_ns, 0.0))
-        elapsed = max(0, event.timestamp_ns - previous_time)
-        evidence = excess + math.exp(-elapsed / decay_ns) * previous_value
-        actor_state[actor_key] = (event.timestamp_ns, evidence)
+        excess = standardized_excess(
+            raw,
+            event.operation,
+            calibration,
+            config.min_operation_calibration,
+        )
         history.append(event.token)
 
         window = event.timestamp_ns // window_ns
-        windows[window][actor_key] = max(windows[window].get(actor_key, 0.0), evidence)
-        detail = {
-            "timestamp_ns": event.timestamp_ns,
-            "actor_id": event.actor_id,
-            "object_id": event.object_id,
-            "operation": event.operation,
-            "direction": event.token[1],
-            "object_role": event.token[2],
-            "object_category": event.token[3],
-            "surprisal": raw,
-            "standardized_excess": excess,
-            "actor_evidence": evidence,
-        }
-        item = (evidence, serial, event.actor_id, detail)
-        serial += 1
-        if len(top_evidence) < config.evidence_top_n:
-            heapq.heappush(top_evidence, item)
-        elif item[:3] > top_evidence[0][:3]:
-            heapq.heapreplace(top_evidence, item)
+        event_counts[window] += 1
+        previous = windows[window][actor_key].get(event.token)
+        if previous is None or excess > previous[0]:
+            windows[window][actor_key][event.token] = (
+                excess,
+                raw,
+                event.timestamp_ns,
+                event.object_id,
+            )
 
     rows: List[Dict[str, object]] = []
-    for window, actor_scores in sorted(windows.items()):
-        tail = sorted(actor_scores.values(), reverse=True)[: config.actor_top_k]
+    evidence_candidates: List[Tuple[float, int, int, Dict[str, object]]] = []
+    serial = 0
+    for window, actor_motifs in sorted(windows.items()):
+        actor_scores: List[float] = []
+        unique_motifs: set[Token] = set()
+        actor_motif_pairs = 0
+        for actor_key, motif_values in actor_motifs.items():
+            actor_motif_pairs += len(motif_values)
+            unique_motifs.update(motif_values)
+            top_motifs = sorted(
+                motif_values.items(),
+                key=lambda item: (-item[1][0], item[0]),
+            )[: config.actor_motif_top_k]
+            actor_score = sum(value[0] for _, value in top_motifs)
+            actor_scores.append(actor_score)
+            for token, (excess, raw, timestamp_ns, object_id) in top_motifs:
+                detail = {
+                    "window_start_ns": window * window_ns,
+                    "timestamp_ns": timestamp_ns,
+                    "actor_id": actor_key[1],
+                    "object_id": object_id,
+                    "operation": token[0],
+                    "direction": token[1],
+                    "object_role": token[2],
+                    "object_category": token[3],
+                    "surprisal": raw,
+                    "standardized_excess": excess,
+                    "actor_distinct_motif_evidence": actor_score,
+                }
+                item = (actor_score, serial, actor_key[1], detail)
+                serial += 1
+                if len(evidence_candidates) < config.evidence_top_n:
+                    heapq.heappush(evidence_candidates, item)
+                elif item[:3] > evidence_candidates[0][:3]:
+                    heapq.heapreplace(evidence_candidates, item)
+
+        tail = sorted(actor_scores, reverse=True)[: config.actor_top_k]
         rows.append({
             "window_start_ns": window * window_ns,
             "window_end_ns": (window + 1) * window_ns,
-            "actors": len(actor_scores),
+            "event_count": event_counts[window],
+            "actors": len(actor_motifs),
+            "unique_motifs": len(unique_motifs),
+            "actor_motif_pairs": actor_motif_pairs,
             "semantic_chain_score": sum(tail) / len(tail) if tail else 0.0,
         })
-    selected = set(select_indices([float(row["semantic_chain_score"]) for row in rows], config.review_budget))
+    selection_specs = {
+        "selected_for_review": "semantic_chain_score",
+        "selected_by_event_count": "event_count",
+        "selected_by_actor_count": "actors",
+    }
+    selections = {
+        output_key: set(select_indices([float(row[score_key]) for row in rows], config.review_budget))
+        for output_key, score_key in selection_specs.items()
+    }
     for index, row in enumerate(rows):
-        row["selected_for_review"] = index in selected
-    evidence_rows = [item[3] for item in sorted(top_evidence, reverse=True)]
+        for output_key, selected in selections.items():
+            row[output_key] = index in selected
+    evidence_rows = [item[3] for item in sorted(evidence_candidates, reverse=True)]
     return rows, evidence_rows
 
 
@@ -489,14 +551,18 @@ def _overlaps(start: int, end: int, intervals: Sequence[Interval]) -> bool:
     return any(start < other_end and end > other_start for other_start, other_end in intervals)
 
 
-def evaluate_frozen_windows(rows: List[Dict[str, object]], attacks: Sequence[Interval]) -> Dict[str, object]:
+def evaluate_frozen_windows(
+    rows: List[Dict[str, object]],
+    attacks: Sequence[Interval],
+    selection_key: str = "selected_for_review",
+) -> Dict[str, object]:
     if not attacks:
         return {}
     attack_indices = {
         i for i, row in enumerate(rows)
         if _overlaps(int(row["window_start_ns"]), int(row["window_end_ns"]), attacks)
     }
-    selected = {i for i, row in enumerate(rows) if bool(row["selected_for_review"])}
+    selected = {i for i, row in enumerate(rows) if bool(row[selection_key])}
     return {
         "attack_windows": len(attack_indices),
         "covered_attack_windows": len(attack_indices & selected),
@@ -540,11 +606,12 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
     config = SemanticChainConfig(
         backoff_strength=args.backoff_strength,
         additive_alpha=args.additive_alpha,
-        actor_decay_minutes=args.actor_decay_minutes,
         window_minutes=args.window_minutes,
         actor_top_k=args.actor_top_k,
+        actor_motif_top_k=args.actor_motif_top_k,
         review_budget=args.review_budget,
         calibration_reservoir=args.calibration_reservoir,
+        min_operation_calibration=args.min_operation_calibration,
         minimum_scale=args.minimum_scale,
         evidence_top_n=args.evidence_top_n,
     )
@@ -621,11 +688,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--backoff-strength", type=float, default=5.0)
     parser.add_argument("--additive-alpha", type=float, default=0.1)
-    parser.add_argument("--actor-decay-minutes", type=float, default=60.0)
     parser.add_argument("--window-minutes", type=float, default=15.0)
     parser.add_argument("--actor-top-k", type=int, default=10)
+    parser.add_argument("--actor-motif-top-k", type=int, default=3)
     parser.add_argument("--review-budget", type=int, default=20)
     parser.add_argument("--calibration-reservoir", type=int, default=50_000)
+    parser.add_argument("--min-operation-calibration", type=int, default=100)
     parser.add_argument("--minimum-scale", type=float, default=0.25)
     parser.add_argument("--evidence-top-n", type=int, default=200)
     parser.add_argument("--output-dir", required=True)

@@ -51,7 +51,8 @@ python -u -m src.detection.semantic_chain \
   --timezone America/New_York \
   "${ARGS[@]}" \
   --actor-top-k 10 \
-  --actor-decay-minutes 60 \
+  --actor-motif-top-k 3 \
+  --min-operation-calibration 100 \
   --window-minutes 15 \
   --review-budget 20 \
   --output-dir "$OUT" \

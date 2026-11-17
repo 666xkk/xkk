@@ -11,6 +11,7 @@ from src.detection.semantic_chain import (
     RobustLocationScale,
     SemanticChainConfig,
     build_catalog,
+    calibration_for_operation,
     canonicalize_event,
     categorize_file,
     categorize_subject,
@@ -120,13 +121,48 @@ def test_attack_interval_parser_uses_explicit_timezone():
     assert end > start
 
 
-def test_configuration_rejects_nonpositive_decay():
+def test_configuration_rejects_nonpositive_motif_budget():
     try:
-        SemanticChainConfig(actor_decay_minutes=0).validate()
+        SemanticChainConfig(actor_motif_top_k=0).validate()
     except ValueError as error:
-        assert "actor_decay_minutes" in str(error)
+        assert "actor_motif_top_k" in str(error)
     else:
-        raise AssertionError("nonpositive decay must be rejected")
+        raise AssertionError("nonpositive motif budget must be rejected")
+
+
+def test_low_sample_operation_calibration_falls_back_to_global():
+    global_stats = RobustLocationScale(1.0, 2.0, 50000)
+    calibration = {
+        "CONNECT": RobustLocationScale(99.0, 0.25, 1),
+        "__GLOBAL__": global_stats,
+    }
+    assert calibration_for_operation("CONNECT", calibration, 100) == global_stats
+
+
+def test_repeating_same_motif_cannot_accumulate_unbounded_evidence():
+    normal = ("READ", "subject_as_src", "file", "configuration")
+    unusual = ("WRITE", "subject_as_src", "file", "temporary")
+    model = fit_model(
+        [event(i, 10, normal) for i in range(1, 100)],
+        SemanticChainConfig(),
+    )
+    calibration = {"__GLOBAL__": RobustLocationScale(0.0, 1.0, 50000)}
+    config = SemanticChainConfig(window_minutes=15, review_budget=1)
+    ten, _ = score_events(
+        [event(1_000_000_000 + i, 1, unusual) for i in range(10)],
+        model,
+        calibration,
+        config,
+    )
+    hundred, _ = score_events(
+        [event(1_000_000_000 + i, 1, unusual) for i in range(100)],
+        model,
+        calibration,
+        config,
+    )
+    assert hundred[0]["semantic_chain_score"] == ten[0]["semantic_chain_score"]
+    assert hundred[0]["event_count"] == 100
+    assert hundred[0]["actor_motif_pairs"] == 1
 
 
 def test_split_overlap_is_rejected_before_database_scoring():

@@ -1,4 +1,4 @@
-# Semantic causal-chain detector v1
+# Semantic causal-chain detector v2
 
 This module is an offline, label-free detector built directly from the DARPA
 TC PostgreSQL event tables. It does not change ORTHRUS training or consume GNN
@@ -11,10 +11,17 @@ test labels.
 2. Freeze the model and estimate robust per-operation location/scale on the
    normal validation day.
 3. Score test events in timestamp order. The normal model is never updated.
-4. Accumulate standardized weak evidence causally per subject and rank fixed
-   15-minute windows under a fixed Top-20 review budget.
+4. Within each 15-minute window, retain only the maximum evidence for each
+   distinct `(subject, semantic motif)` pair. Sum the Top-3 distinct motifs per
+   subject, then average the Top-10 subjects for the window score.
 5. Attack intervals, if supplied manually, are evaluated only after scores and
    selections are frozen.
+
+Version 2 deliberately removes the v1 event-level additive accumulator. That
+accumulator allowed a millisecond-scale benign loop to grow evidence without
+bound. In v2, repeating an identical actor/motif pair cannot increase semantic
+evidence, although raw `event_count` is retained as an explicit activity
+baseline.
 
 The runner also rejects nonchronological splits. In particular, CADETS_E3 uses
 days 3--5 for training rather than the historical ORTHRUS inclusion of days
@@ -57,26 +64,31 @@ cd /hy-tmp/orthrus
 export PGPASSWORD='YOUR_POSTGRES_PASSWORD'
 
 DATASET=CLEARSCOPE_E3 \
-OUT=paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1 \
+OUT=paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V2 \
 bash scripts/run_semantic_chain_e3.sh
 ```
 
 Inspect label-free outputs first:
 
 ```bash
-cat paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/summary.json
-head -20 paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/window_scores.csv
-head -20 paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/top_evidence.csv
+cat paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V2/summary.json
+head -20 paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V2/window_scores.csv
+head -20 paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V2/top_evidence.csv
 ```
 
 Only after those scores are frozen, evaluate the known ClearScope interval:
 
 ```bash
 python -m src.detection.semantic_chain_evaluate \
-  --window-scores paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/window_scores.csv \
+  --window-scores paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V2/window_scores.csv \
   --attack-interval '2018-04-11 13:54:00~2018-04-11 14:48:00' \
-  --output paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V1/frozen_attack_evaluation.json
+  --output paper1/results/CLEARSCOPE_E3/SEMANTIC_CHAIN_V2/frozen_attack_evaluation.json
 ```
+
+The frozen evaluation reports three equal-budget rankings: semantic chain,
+raw event count and unique actor count. Continue to another dataset only if
+semantic-chain coverage exceeds both activity baselines; matching an activity
+baseline is not evidence of semantic novelty.
 
 Do not tune parameters against attack intervals. First compare fixed defaults
 across ClearScope, THEIA and CADETS. Ground-truth attack-window evaluation is a
