@@ -93,3 +93,34 @@ baseline is not evidence of semantic novelty.
 Do not tune parameters against attack intervals. First compare fixed defaults
 across ClearScope, THEIA and CADETS. Ground-truth attack-window evaluation is a
 separate frozen-score audit.
+
+## Representative ClearScope calibration day
+
+The historical day-2 validation split contains only 2,273 edges and is not
+representative of the day-11/12 test stream. Day 6 is an unused normal day with
+all eight test operation families. Build it as an isolated split without
+changing `val_files` or overwriting existing preprocessing:
+
+```bash
+python -u scripts/build_calibration_split.py \
+  --dataset CLEARSCOPE_E3 \
+  --graph-name graph_6 \
+  --split-name calibration_day6
+```
+
+Then run a selected frozen checkpoint only on that split:
+
+```bash
+python -u scripts/run_calibration_inference.py \
+  --dataset CLEARSCOPE_E3 \
+  --seed 0 \
+  --checkpoint-dir "$CHECKPOINT_DIR" \
+  --split-name calibration_day6 \
+  --batch-size 2048 \
+  --output-root paper1/results/CLEARSCOPE_E3/DAY6_CALIBRATION_LOSSES
+```
+
+The inference tool constructs `full_data` in the exact order
+`train + calibration_day6` and rejects the run unless the checkpoint neighbor
+loader's `cur_e_id` equals the number of training edges. It does not train the
+model or run evaluation/tracing.

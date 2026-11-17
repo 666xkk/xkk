@@ -14,3 +14,11 @@ distinct-motif evidence and adds equal-budget event-count and actor-count
 baselines. The checksum is recorded beside the release archive.
 
 SHA-256: `76f206bc8b3fd982e6c08149e0d70c4b39c1f4a1106fbbed248d8e574db60fc6`
+
+The calibration-day extension adds isolated graph-6 embedding and
+calibration-only inference tools. It is released separately so prior v1/v2
+archives remain immutable.
+
+Calibration tools release: `orthrus-day6-calibration-tools-20261117.tar.gz`
+
+SHA-256: `66f2127eaca81ef2d4a38c95773c1a7c166072c33923fd3822ba5909c4aa3517`
