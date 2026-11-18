@@ -47,3 +47,13 @@ and replays validation/test for archived selected weights without retraining.
 Frozen replay release: `orthrus-frozen-selected-replay-20261117.tar.gz`
 
 SHA-256: `7734b436d5a03dfdc8a48b130ccb7d6541ce93eef8be747714e767cfc7b41577`
+
+The incident-benchmark extension evaluates already frozen window selections
+against an exact uniform-random fixed-budget baseline. It reports per-seed and
+per-dataset attack-window recall, attack-episode recall, incident reduction,
+incident ranks, and exact hypergeometric tail probabilities without changing
+detector outputs or selection parameters.
+
+Incident benchmark release: `orthrus-incident-benchmark-20261118.tar.gz`
+
+SHA-256: `f9bace9de10d5ddcc5bd3b6bf376eac5429ab751d5a60f44022e0ec83e8e3267`
