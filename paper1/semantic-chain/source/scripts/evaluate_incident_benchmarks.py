@@ -72,6 +72,22 @@ def exact_random_episode_distribution(
     return {hits: ways / denominator for hits, ways in sorted(counts.items())}
 
 
+def convolve_distributions(
+    distributions: list[dict[int, float]],
+) -> dict[int, float]:
+    """Combine independent per-dataset episode-hit distributions."""
+    combined = {0: 1.0}
+    for distribution in distributions:
+        updated: dict[int, float] = defaultdict(float)
+        for left_hits, left_probability in combined.items():
+            for right_hits, right_probability in distribution.items():
+                updated[left_hits + right_hits] += (
+                    left_probability * right_probability
+                )
+        combined = dict(updated)
+    return dict(sorted(combined.items()))
+
+
 def rank_incidents(rows: list[dict], max_gap: int, top_score_count: int):
     selected = [
         int(row["window"])
@@ -156,6 +172,7 @@ def evaluate_seed(
         "random_expected_covered_episodes": expected_covered,
         "random_expected_episode_recall": expected_covered / episode_count,
         "random_p_episode_coverage_ge_observed": tail_probability,
+        "random_episode_distribution": json.dumps(distribution, sort_keys=True),
     }
 
 
@@ -186,6 +203,53 @@ def summarize(rows: list[dict]) -> list[dict]:
             summary[f"{metric}_mean"] = mean(values)
             summary[f"{metric}_sd"] = stdev(values) if len(values) > 1 else 0.0
         output.append(summary)
+    return output
+
+
+def summarize_cross_dataset(rows: list[dict]) -> list[dict]:
+    """Aggregate independent datasets without treating seeds as independent."""
+    output = []
+    for seed in sorted({int(row["seed"]) for row in rows}):
+        group = [row for row in rows if int(row["seed"]) == seed]
+        distributions = [
+            {int(hits): float(probability) for hits, probability in json.loads(
+                row["random_episode_distribution"]
+            ).items()}
+            for row in group
+        ]
+        combined = convolve_distributions(distributions)
+        observed = sum(int(row["covered_attack_episodes"]) for row in group)
+        total_episodes = sum(int(row["attack_episodes"]) for row in group)
+        expected = sum(
+            hits * probability for hits, probability in combined.items()
+        )
+        tail = sum(
+            probability
+            for hits, probability in combined.items()
+            if hits >= observed
+        )
+        total_selected = sum(int(row["review_budget"]) for row in group)
+        total_incidents = sum(int(row["incidents"]) for row in group)
+        total_attack_windows = sum(int(row["attack_windows"]) for row in group)
+        covered_attack_windows = sum(
+            int(row["covered_attack_windows"]) for row in group
+        )
+        output.append({
+            "seed": seed,
+            "datasets": len(group),
+            "attack_episodes": total_episodes,
+            "covered_attack_episodes": observed,
+            "attack_episode_recall": observed / total_episodes,
+            "random_expected_covered_episodes": expected,
+            "random_expected_episode_recall": expected / total_episodes,
+            "random_p_total_episode_coverage_ge_observed": tail,
+            "attack_windows": total_attack_windows,
+            "covered_attack_windows": covered_attack_windows,
+            "attack_window_recall": covered_attack_windows / total_attack_windows,
+            "selected_windows": total_selected,
+            "incidents": total_incidents,
+            "window_reduction_ratio": 1 - total_incidents / total_selected,
+        })
     return output
 
 
@@ -232,9 +296,11 @@ def main() -> None:
                 )
 
     summaries = summarize(rows)
+    cross_dataset = summarize_cross_dataset(rows)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(args.output_dir / "per_seed.csv", rows)
     write_csv(args.output_dir / "dataset_summary.csv", summaries)
+    write_csv(args.output_dir / "cross_dataset_summary.csv", cross_dataset)
     with (args.output_dir / "run_config.json").open("w") as handle:
         json.dump(
             {
@@ -248,6 +314,7 @@ def main() -> None:
         )
     print(f"wrote: {args.output_dir / 'per_seed.csv'}")
     print(f"wrote: {args.output_dir / 'dataset_summary.csv'}")
+    print(f"wrote: {args.output_dir / 'cross_dataset_summary.csv'}")
 
 
 if __name__ == "__main__":

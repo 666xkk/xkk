@@ -21,3 +21,7 @@ python -u scripts/evaluate_incident_benchmarks.py \
 `random_p_episode_coverage_ge_observed` is the exact probability that a
 uniform random selection of the same number of windows covers at least as many
 attack episodes as the frozen method.  Labels are used only by this evaluator.
+
+`cross_dataset_summary.csv` convolves the exact per-dataset null distributions
+for each seed. It treats distinct datasets as independent but does not treat
+the five model seeds as five independent attack corpora.

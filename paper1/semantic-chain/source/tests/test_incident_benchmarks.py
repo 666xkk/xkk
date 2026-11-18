@@ -33,3 +33,10 @@ def test_exact_random_expected_hits_matches_episode_formula():
         for size in sizes
     )
     assert abs(expected - direct) < 1e-12
+
+
+def test_convolve_distributions():
+    combined = MODULE.convolve_distributions(
+        [{0: 0.5, 1: 0.5}, {0: 0.25, 1: 0.75}]
+    )
+    assert combined == {0: 0.125, 1: 0.5, 2: 0.375}

@@ -57,3 +57,11 @@ detector outputs or selection parameters.
 Incident benchmark release: `orthrus-incident-benchmark-20261118.tar.gz`
 
 SHA-256: `f9bace9de10d5ddcc5bd3b6bf376eac5429ab751d5a60f44022e0ec83e8e3267`
+
+Version 2 adds an exact cross-dataset convolution of the random-budget null
+distributions. Distinct datasets are treated as independent; model seeds are
+reported separately and are not misrepresented as independent attack corpora.
+
+Incident benchmark v2: `orthrus-incident-benchmark-v2-20261118.tar.gz`
+
+SHA-256: `474d7b1cce4e2f8610cfa35ac56303e0b55133d7ef84d2c19e53c30808f1d945`
