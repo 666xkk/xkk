@@ -65,3 +65,14 @@ reported separately and are not misrepresented as independent attack corpora.
 Incident benchmark v2: `orthrus-incident-benchmark-v2-20261118.tar.gz`
 
 SHA-256: `474d7b1cce4e2f8610cfa35ac56303e0b55133d7ef84d2c19e53c30808f1d945`
+
+The frozen multi-scale causal-incident extension implements the coverage
+operating mode. It unions preselected scale-1 and scale-4 windows, applies
+label-free within-scale rank normalization, and merges adjacent candidates
+into ranked incidents. Efficient scale-4 mode remains unchanged and is
+reported separately because the coverage mode spends a larger window budget.
+
+Multi-scale incident release:
+`orthrus-multiscale-causal-incidents-20261118.tar.gz`
+
+SHA-256: `b51cce5a8a44d43173f3870697d4fb427f645058601220b843680b5e29ec4803`
