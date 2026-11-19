@@ -76,3 +76,15 @@ Multi-scale incident release:
 `orthrus-multiscale-causal-incidents-20261118.tar.gz`
 
 SHA-256: `b51cce5a8a44d43173f3870697d4fb427f645058601220b843680b5e29ec4803`
+
+The IEEE TDSC figure release contains a single entry point that runs the
+frozen module ablations and regenerates the complete ten-figure paper set in
+PDF, SVG, and 600-dpi PNG formats. It includes the method overview, collective
+weak-evidence ablation, multiscale-fusion ablation, and incident-reconstruction
+sensitivity analysis. Attack labels enter only after scores and fixed-budget
+selections are frozen.
+
+TDSC figure release:
+`orthrus-tdsc-complete-figures-20261119.tar.gz`
+
+SHA-256: `f0a8ff69f7c736aecb3c511ef79fc85ae35701945c674b0265065431de3caaee`
