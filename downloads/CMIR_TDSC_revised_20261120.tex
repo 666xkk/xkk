@@ -1,0 +1,1374 @@
+\documentclass[lettersize,journal]{IEEEtran}
+
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage[caption=false,font=footnotesize,labelfont=sf,textfont=sf]{subfig}
+\usepackage{textcomp}
+\usepackage{stfloats}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{cite}
+
+\hyphenation{pro-ve-nance multi-scale time-line ORTHRUS}
+
+% Compile from the project root.  All final vector figures are stored directly
+% in the TDSC directory and are referenced by explicit, auditable paths.
+
+\newcommand{\method}{CMIR}
+\newcommand{\topk}{\operatorname{TopK}}
+\newcommand{\rank}{\operatorname{rank}}
+\newcommand{\ind}{\mathbb{I}}
+\newcommand{\dataset}[1]{\textsc{#1}}
+
+\begin{document}
+
+\title{From Edge Anomalies to Incidents: Causal Multiscale Scoring and Fixed-Budget Reconstruction for Provenance-Based Intrusion Detection}
+
+% Anonymous review title block.  Replace only this \author command with the
+% final author/affiliation block after the journal's review-stage instructions
+% permit deanonymization.  Do not add \IEEEpubid in a submission manuscript;
+% IEEE supplies the publication identifier after acceptance.
+\author{Anonymous Authors}
+
+\markboth{IEEE Transactions on Dependable and Secure Computing}%
+{Anonymous Authors: Causal Multiscale Scoring and Incident Reconstruction}
+
+\maketitle
+
+\begin{abstract}
+Provenance-based intrusion detection systems score millions of system events,
+whereas an analyst needs a short list of temporally coherent incidents.  This
+paper presents \method{}, a post-inference layer that converts frozen anomaly
+scores into ranked incidents without retraining or consulting test labels.
+For each completed window, \method{} projects edge losses to role-aware node
+evidence, aggregates the strongest collective evidence, and computes
+forward-only scores at one- and four-window scales.  A fixed per-scale budget,
+rank-percentile fusion, and deterministic temporal clustering then produce an
+auditable incident queue.  Model checkpoints and reconstruction parameters are
+frozen before test-label evaluation.
+
+We evaluate five independently trained model instances on each of four
+provenance benchmarks: CADETS-E3, THEIA-E3, CLEARSCOPE-E3, and OPTC-H201.  The
+multiscale configuration recovers all 35 dataset--seed episode instances across
+20 runs, raises mean attack-window recall from 0.607 for the efficient scale-4
+mode to 0.713, and compresses 127 selected windows per cross-dataset seed into
+53.8 incidents.  Its exact budget-matched joint tail probability ranges from
+$1.15\!\times\!10^{-3}$ to $1.50\!\times\!10^{-3}$ across seeds.  Scale 4
+produces only 29.6 incidents per cross-dataset seed while retaining 0.857
+episode recall.  Ablations confirm complementary contributions from collective
+evidence, temporal scale, rank fusion, and incident construction.  A node-output
+adapter further composes \method{} with MAGIC, ThreaTrace, and VELOX on
+CLEARSCOPE-E3; ThreaTrace and VELOX recover the attack episode in all five
+seeds without detector-specific tuning.  Core reconstruction requires
+5.5--5.7 ms for 161--162-window streams and 28.0 ms for a 768-window stream.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Advanced persistent threats, anomaly detection, forward-only temporal analysis,
+incident reconstruction, multiscale fusion, provenance graphs.
+\end{IEEEkeywords}
+
+\section{Introduction}
+\label{sec:introduction}
+
+\IEEEPARstart{P}{rovenance-based} intrusion detection systems (PIDS) organize
+processes, files, sockets, and system calls as causal graphs.  This representation
+supports both anomaly detection and attack investigation, from early intrusion
+backtracking~\cite{king2003backtracking} to streaming detectors such as
+StreamSpot~\cite{manzoor2016streamspot}, UNICORN~\cite{han2020unicorn},
+MAGIC~\cite{jia2024magic}, ThreaTrace~\cite{wang2022threatrace}, and
+ORTHRUS~\cite{jiang2025orthrus}.  Recent systems
+have substantially improved representation learning and node attribution, yet a
+deployment gap remains: a detector emits edge or node scores, while a security
+analyst consumes incidents.  Selecting isolated high-score events either floods
+the analyst with repeated evidence from one attack or misses weak events that
+become persuasive only when considered collectively and over time.
+
+Attack reconstruction systems address related but distinct parts of this gap.
+SLEUTH~\cite{hossain2017sleuth}, HOLMES~\cite{milajerdi2019holmes}, and
+POIROT~\cite{milajerdi2019poirot} exploit causal dependencies to explain or align
+suspicious activity; NoDoze~\cite{hassan2019nodoze} ranks alerts to reduce fatigue.
+Their success motivates an explicit, testable interface between anomaly scoring
+and graph investigation: which completed windows should be investigated, and
+which selected windows belong to the same incident?
+
+We answer these questions with \method{} (Causal Multiscale Incident
+Reconstruction), shown in Fig.~\ref{fig:overview}.  \method{} leaves the
+underlying detector unchanged.  In our experiments, ORTHRUS is trained only on
+normal data, its checkpoint is selected by validation loss, and the selected
+model is frozen before test inference.  \method{} then operates on timestamped
+edge losses.  Its first innovation is a role-aware collective statistic: edge
+losses are projected to file nodes and the strongest $K$ node values summarize
+each window.  Its second innovation is strictly causal temporal evidence at two
+scales.  Its third innovation is a fixed-budget rank fusion followed by temporal
+incident reconstruction.  Labels enter only after the ranked incidents have
+been written to disk.
+
+ORTHRUS supplies the primary edge-output evaluation because it preserves the
+full timestamped anomaly stream required by every \method{} module.  We also
+compose the same frozen reconstruction parameters with node outputs from
+VELOX~\cite{jiang2025orthrus}, MAGIC~\cite{jia2024magic}, and
+ThreaTrace~\cite{wang2022threatrace} on CLEARSCOPE-E3.  This second experiment evaluates the
+score interface directly: the upstream models are trained independently, while
+\method{} receives only their node scores and native temporal locations.
+
+Our study includes CADETS-E3, THEIA-E3, and CLEARSCOPE-E3 from DARPA Transparent
+Computing~\cite{darpaTC}, together with OPTC-H201.  The four datasets differ in
+operating system, activity volume, number of attack episodes, and the strength of
+the frozen detector's node-level signal.  Five independent training seeds per
+dataset provide 20 complete detector runs.  This design evaluates whether the
+reconstruction layer remains useful across retraining variation and markedly
+different score distributions.
+
+This paper makes five contributions:
+\begin{itemize}
+  \item \textbf{Collective role-aware evidence.}  We transform event-level
+  reconstruction loss into a robust window statistic using the strongest
+  file-node evidence, preserving weak coordinated activity that a single-edge
+  threshold can discard.
+  \item \textbf{Strictly causal multiscale scoring.}  Short and sustained
+  activity are scored with trailing windows only.  A fixed per-scale budget and
+  rank-percentile fusion avoid score-scale assumptions and test-label tuning.
+  \item \textbf{Incident reconstruction with an exact null model.}  Selected
+  windows are merged into temporal incidents and evaluated against the exact
+  uniform fixed-budget random baseline, including cross-dataset convolution.
+  \item \textbf{A five-seed, four-dataset evaluation.}  The multiscale method
+  recovers every annotated episode in all 20 runs, while the scale-4 operating
+  mode offers a smaller analyst queue.  Complete module and sensitivity
+  ablations explain the contribution of each stage.
+  \item \textbf{Cross-detector composition.}  A node-output adapter evaluates
+  the unchanged reconstruction parameters with three additional upstream
+  detectors.  VELOX and ThreaTrace attain complete five-seed episode coverage,
+  demonstrating interface compatibility beyond the primary edge-output
+  implementation.
+\end{itemize}
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{TDSC/fig0_method_overview.pdf}
+  \caption{End-to-end overview of \method{}.  A validation-selected, frozen
+  ORTHRUS model emits timestamped edge losses.  The proposed layer constructs
+  collective file-node evidence, causal scores at scales 1 and 4, a fixed-budget
+  rank-percentile union, and temporally coherent incidents.  Ground-truth labels
+  are isolated from all stages above the dashed evaluation boundary.}
+  \label{fig:overview}
+\end{figure*}
+
+\section{Background and Related Work}
+\label{sec:related}
+
+\subsection{Whole-System Provenance}
+
+Whole-system provenance records dependencies induced by operating-system events.
+Provenance-aware storage introduced persistent causal histories at the storage
+layer~\cite{muniswamy2006pass}.  Linux Provenance Modules provide a trusted
+whole-system capture mechanism~\cite{bates2015lpm}, while CamFlow demonstrates
+practical capture, policy control, and cloud deployment
+~\cite{pasquier2017camflow,pasquier2017managed}.  Kernel-supported logging
+~\cite{ma2018kernel}, tamper-evident audit designs~\cite{paccagnella2020custos},
+and throughput-aware auditing~\cite{inam2022faust} further strengthen the data
+plane.  Provenance graphs are attractive for security because an
+information-flow path naturally supports causal backtracking, but their size and
+heterogeneity require strong filtering before analyst review.
+
+\subsection{Detection and Investigation}
+
+StreamSpot summarizes streaming heterogeneous graphs for anomaly
+detection~\cite{manzoor2016streamspot}; UNICORN uses historical graph sketches
+for long-running APT detection~\cite{han2020unicorn}; and MAGIC learns masked
+graph representations for detection and investigation~\cite{jia2024magic}.
+ThreaTrace performs node-level threat detection through provenance graph
+learning~\cite{wang2022threatrace}.
+SIGL learns installation-specific provenance behavior~\cite{han2021sigl},
+PAGODA targets real-time detection at scale~\cite{xie2020pagoda}, and
+Log2Vec learns heterogeneous enterprise-log representations
+~\cite{liu2019log2vec}.  ``You Are What You Do'' uses provenance to identify
+stealthy malware~\cite{wang2020yawyd}, while ATLAS learns attack sequences for
+investigation~\cite{alsaheel2021atlas}.
+ORTHRUS emphasizes attribution quality and emits edge reconstruction losses from
+a temporal graph model~\cite{jiang2025orthrus}.  We use those frozen losses as
+the upstream signal rather than modifying ORTHRUS's encoder or training loss.
+This separation makes the contribution precise: \method{} is an incident-level
+decision and reconstruction layer.
+
+Investigation systems use causal structure in complementary ways.  SLEUTH
+propagates trust labels over audit dependencies~\cite{hossain2017sleuth}; HOLMES
+correlates suspicious information flows into APT scenarios
+~\cite{milajerdi2019holmes}; POIROT aligns threat behavior with kernel audit
+records~\cite{milajerdi2019poirot}; and NoDoze combines anomaly and provenance
+dependence to prioritize alerts~\cite{hassan2019nodoze}.  ProTracer alternates
+logging and tainting~\cite{ma2016protracer}; MPI and MCI partition or infer
+causality for attack investigation~\cite{ma2017mpi,kwon2018mci}; Winnower uses
+grammatical inference to compact cluster provenance~\cite{hassan2018winnower};
+and RapSheet performs tactical endpoint provenance analysis
+~\cite{hassan2020rapsheet}.  LogGC~\cite{lee2013loggc},
+HERCULE~\cite{pei2016hercule}, and the provenance-auditing SoK
+~\cite{inam2023sok} further characterize the trade-off between storage,
+causality, and investigation quality.  HADES extends provenance analytics to
+cross-machine Active Directory attacks in IEEE TDSC
+~\cite{liu2026hades}.  \method{} supplies these downstream tools with a bounded
+set of causal temporal regions, reducing repeated window alerts before expensive
+graph expansion begins.
+
+\subsection{Representation Learning and Robustness}
+
+The frozen detector builds on a broader representation-learning lineage:
+Word2Vec~\cite{mikolov2013word2vec} and node2vec~\cite{grover2016node2vec}
+provide distributed and structural embeddings; GraphSAGE
+~\cite{hamilton2017graphsage} supports inductive graph learning; graph attention
+~\cite{velickovic2018gat} learns neighbor importance; and Temporal Graph Networks
+~\cite{rossi2020tgn} model timestamped interactions.  Our rank-based fusion is
+well matched to these heterogeneous score generators because it does not assume
+that two temporal scales share a calibrated numeric range.  Provenance detectors
+also face mimicry attacks that preserve superficially benign graph structure
+~\cite{goyal2023mimicry}; collective and multiscale evidence increase the amount
+of coordinated behavior that must be hidden simultaneously.
+
+\subsection{Positioning of This Work}
+
+Three distinctions define our approach.  First, its unit of decision is a
+completed time window, not a whole-trace node maximum.  Second, all temporal
+features are trailing; an earlier window score cannot change when a future event
+is added.  Third, the selection budget is explicit.  The primary task is batch
+triage over a closed review horizon: scores are causal at every prefix, and the
+final top-$B$ selection uses the complete unlabeled score sequence in that
+horizon.  These properties allow a direct operational interpretation: the
+chosen budget controls the number of temporal regions admitted to incident
+construction, and clustering controls the remaining incident queue.
+Throughout this paper, \emph{causal} denotes forward-only temporal availability
+in the systems sense; it does not denote causal-effect identification.
+
+\section{Problem Formulation}
+\label{sec:problem}
+
+Let a provenance stream be partitioned chronologically into $T$ immutable
+windows $\mathcal{W}_1,\ldots,\mathcal{W}_T$.  Window $t$ contains directed events
+$e=(u,v,r,\tau)$, where $u$ and $v$ are provenance entities, $r$ is an event
+type, and $\tau$ is the timestamp.  A frozen detector assigns every event a
+nonnegative reconstruction loss $\ell_{e,t}$.  The reconstruction layer receives
+only
+\begin{equation}
+  \mathcal{X}=\{(t,u,v,r,\tau,\ell_{e,t})\};
+\end{equation}
+it does not receive attack labels or attack intervals.  The score for window
+$t$ is computed from $\mathcal{X}_{1:t}$ only; after a prespecified review
+horizon closes, the unlabeled score sequence is ranked under the fixed budget.
+
+The output is an ordered list of incidents
+$\mathcal{I}=(I_1,\ldots,I_M)$, where each $I_j$ is a set of selected temporal
+windows.  We seek high recall of annotated attack episodes and attack-overlap
+windows under a transparent review budget.  We measure two recalls:
+\begin{align}
+ R_{\mathrm{win}} & = \frac{|\{t:y_t=1\}\cap\widehat{\mathcal W}|}
+ {|\{t:y_t=1\}|}, \label{eq:windowrecall}\\
+ R_{\mathrm{epi}} & = \frac{\sum_{q=1}^{Q}
+ \ind[\widehat{\mathcal W}\cap A_q\neq\varnothing]}{Q},
+ \label{eq:episoderecall}
+\end{align}
+where $\widehat{\mathcal W}$ is the selected-window set and $A_q$ contains the
+windows overlapped by attack episode $q$.  Episode recall captures the primary
+investigation objective; window recall measures within-episode temporal
+coverage.
+
+\subsection{Threat and Evaluation Model}
+
+The adversary may distribute malicious actions across processes, files, and
+time, producing evidence weaker than the largest benign event.  The adversary
+does not alter stored detector losses or the experiment manifest.  Training and
+checkpoint selection use no test labels.  Hyperparameters $(K,H,B,g,q)$ are
+fixed at $K=10$, $H=\{1,4\}$, $B=20$ windows per scale, maximum incident gap
+$g=2$, and top-score count $q=3$.  Attack annotations are consumed only in the
+post-hoc evaluation represented by Eqs.~\eqref{eq:windowrecall} and
+\eqref{eq:episoderecall}.
+
+\section{Causal Multiscale Incident Reconstruction}
+\label{sec:method}
+
+\subsection{Design Objectives and End-to-End Data Flow}
+
+The central design problem is not to produce another anomaly detector.  It is to
+transform a detector's dense event-loss stream into a small number of temporal
+investigation units while preserving attack evidence.  Four requirements follow
+from this distinction.
+
+\begin{enumerate}
+  \item \emph{Detector preservation:} reconstruction must not change the
+  trained encoder, checkpoint, edge features, or event losses.  Any improvement
+  can therefore be attributed to evidence organization rather than retraining.
+  \item \emph{Temporal causality:} the score attached to window $t$ may depend
+  on windows $1{:}t$, but never on $t{+}1{:}T$.  This permits chronological
+  replay and prevents a future event from strengthening an earlier score.
+  \item \emph{Explicit workload:} admission to reconstruction must have a fixed
+  and auditable budget instead of a dataset-specific score threshold.
+  \item \emph{Incident semantics:} repeated evidence from one campaign should
+  become one investigation item, without deleting the selected windows used to
+  compute coverage.
+\end{enumerate}
+
+Figure~\ref{fig:overview} realizes these requirements as five interfaces.  The
+frozen detector exports an immutable edge-loss table.  Role projection converts
+edge evidence into node evidence within each window.  Collective aggregation
+produces one raw score per window.  Causal temporal operators generate
+scale-specific score streams, after which rank fusion enforces a per-scale
+budget.  Finally, temporal clustering produces incidents and an audit manifest.
+Each interface writes its output before the next stage begins; consequently,
+the complete result can be reproduced from edge losses without loading the
+detector checkpoint again.
+
+The method separates two notions that are often conflated.  A \emph{causal
+score} is computable when its window closes.  A \emph{budgeted selection} ranks
+those causal scores over a prespecified, closed review horizon (for example, one
+day or one benchmark test split).  The reported experiments evaluate this batch
+triage setting.  In a deployment, the same operation can be executed at the end
+of every fixed review horizon; no attack label is required in either setting.
+
+\subsection{Why Event Thresholding Is Insufficient}
+
+Let $N_t=|\mathcal W_t|$ be the event volume in window $t$.  A maximum edge loss
+is sensitive to one benign outlier, whereas a mean edge loss can shrink as
+$N_t$ grows.  A global node maximum additionally collapses time: a node that
+becomes anomalous late in the trace may appear to have been suspicious in every
+earlier window.  These failure modes motivate a statistic with three levels of
+structure: (i) retain the strongest edge loss incident to each semantic object,
+(ii) require support from several objects, and (iii) aggregate only over trailing
+time.  Equations~\eqref{eq:nodeevidence}--\eqref{eq:causalscale} implement these
+levels directly.
+
+\subsection{Frozen Edge-Anomaly Signal}
+
+For every seed, the upstream detector is trained on its prescribed normal
+training split.  We select the checkpoint with minimum validation loss and
+freeze both weights and neighbor state before test inference.  This protocol
+prevents the reconstruction method from benefiting from a test-selected epoch.
+The resulting edge losses retain fine-grained temporal and relational
+information, but their raw scale varies across seeds and event types.  \method{}
+therefore uses order statistics and within-seed ranks instead of a shared loss
+threshold.
+
+\subsection{Role-Aware Collective Evidence}
+
+For a node $v$ in the chosen role $\rho$ (file in all primary experiments),
+define its evidence in window $t$ as the largest incident edge loss:
+\begin{equation}
+ a_{v,t}=\max_{e\in\mathcal{W}_t:\,v\in\{\mathrm{src}(e),\mathrm{dst}(e)\}}
+ \ell_{e,t},\qquad \operatorname{role}(v)=\rho .
+ \label{eq:nodeevidence}
+\end{equation}
+Using both source and destination appearances is important because audit schemas
+may encode the same semantic access in either direction.  Let
+$a_{(1),t}\geq a_{(2),t}\geq\cdots$ be the descending role-node evidence.  The
+raw collective score is
+\begin{equation}
+ r_t=\frac{1}{k_t}\sum_{i=1}^{k_t}a_{(i),t},\qquad
+ k_t=\min(K,|V_{\rho,t}|).
+ \label{eq:collective}
+\end{equation}
+This statistic rewards several anomalous objects without allowing window size to
+dominate.  $K=1$ reduces to a maximum; averaging all nodes is
+density-dominated.  The frozen primary choice $K=10$ is evaluated, rather than
+selected, by the post-hoc cross-dataset ablation in Section~\ref{sec:ablation}.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{TDSC/fig10_collective_evidence_mechanism.pdf}
+  \caption{Role-aware collective evidence. Edge anomaly losses are projected
+  to role-constrained nodes with a max operator and then aggregated over the
+  Top-$K$ node evidence. The displayed values are an explanatory example of
+  Eqs.~\eqref{eq:nodeevidence}--\eqref{eq:collective}; the frozen primary
+  setting is $K=10$.}
+  \label{fig:collective-mechanism}
+\end{figure*}
+
+\subsection{Strictly Causal Temporal Scales}
+
+For a trailing scale $h\in H$, \method{} computes
+\begin{equation}
+ c_t^{(h)}=\frac{1}{|\mathcal H_t^{(h)}|}
+ \sum_{j\in\mathcal H_t^{(h)}}r_j,
+ \quad
+ \mathcal H_t^{(h)}=\{\max(1,t-h+1),\ldots,t\}.
+ \label{eq:causalscale}
+\end{equation}
+Thus $h=1$ reacts to a short burst and $h=4$ accumulates sustained weak evidence.
+Equation~\eqref{eq:causalscale} contains no centered or future window.  For any
+$t$, $c_t^{(h)}$ is a deterministic function of $\mathcal{W}_{1:t}$, giving the
+following prefix-invariance property:
+\begin{equation}
+ \mathcal{X}_{1:t}=\mathcal{X}'_{1:t}
+ \Longrightarrow c_j^{(h)}(\mathcal{X})=c_j^{(h)}(\mathcal{X}')
+ \quad \forall j\leq t.
+ \label{eq:prefix}
+\end{equation}
+
+\subsection{Fixed-Budget Rank Fusion}
+
+For each scale, rank all $T$ windows by $c_t^{(h)}$ in descending order with a
+deterministic chronological tie break.  Exactly $B$ windows are selected:
+\begin{equation}
+ \mathcal S_h=\{t:\rank_h(t)\leq B\}.
+ \label{eq:scalechoice}
+\end{equation}
+We map scale-specific ranks to comparable percentiles,
+\begin{equation}
+ p_t^{(h)}=1-\frac{\rank_h(t)-1}{\max(1,T-1)},
+ \label{eq:percentile}
+\end{equation}
+and construct the frozen multiscale union and score
+\begin{equation}
+ \widehat{\mathcal W}=\bigcup_{h\in H}\mathcal S_h,
+ \qquad m_t=\max_{h\in H}p_t^{(h)}.
+ \label{eq:fusion}
+\end{equation}
+The union preserves scale-specific discoveries; the maximum percentile prevents
+a strong short-lived signal from being diluted by another scale.  Because
+$B|H|$ is an upper bound rather than an equality, agreement between scales
+automatically reduces the review budget.
+
+Rank normalization serves a second purpose.  If a seed, event vocabulary, or
+detector checkpoint applies a strictly increasing transformation to its anomaly
+losses, the ordering of windows is preserved even though their numerical ranges
+differ.  This makes fusion reproducible across the markedly different score
+scales observed in the four datasets.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{TDSC/fig11_causal_multiscale_fusion.pdf}
+  \caption{Strictly causal multiscale scoring and rank fusion. Each temporal
+  score uses only the current and preceding windows; per-scale ranks are
+  normalized before the selected sets are united. Rings show an illustrative
+  Top-3 selection for visual clarity, whereas all primary experiments use the
+  frozen budget $B=20$ per scale and $H=\{1,4\}$.}
+  \label{fig:multiscale-mechanism}
+\end{figure*}
+
+\subsection{Incident Construction and Ranking}
+
+Sort selected window indices.  Adjacent selected indices belong to the same
+incident when their difference is at most $g$; with $g=2$, one unselected window
+may be bridged.  For incident $I$, let $m_{(1)}(I)\geq m_{(2)}(I)\geq\cdots$ be
+its selected-window scores.  Its score is
+\begin{equation}
+ S(I)=\frac{1}{q_I}\sum_{i=1}^{q_I}m_{(i)}(I),
+ \qquad q_I=\min(q,|I|), \quad q=3.
+ \label{eq:incidentscore}
+\end{equation}
+Top-$q$ aggregation rewards persistent evidence but avoids penalizing a long
+incident with weaker boundary windows.  Incidents are sorted by $S(I)$, then by
+scale support and start time for deterministic output.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{TDSC/fig12_incident_reconstruction.pdf}
+  \caption{Temporal incident reconstruction and ranking. Selected windows
+  separated by at most $g=2$ are connected, and each resulting incident is
+  ranked by its Top-$q$ window evidence with $q=3$. Numbers in the diagram are
+  explanatory values that instantiate Eq.~\eqref{eq:incidentscore}.}
+  \label{fig:incident-mechanism}
+\end{figure*}
+
+\subsection{Formal Properties}
+
+The following properties explain why the modules compose cleanly.
+
+\noindent\textbf{Property 1 (prefix-causal scores).}
+For every $h\in H$ and $t\leq T$, $c_t^{(h)}$ is measurable with respect to the
+edge losses in $\mathcal W_{1:t}$.  Appending or modifying
+$\mathcal W_{t+1:T}$ cannot change $c_j^{(h)}$ for any $j\leq t$.
+
+\emph{Justification:} $a_{v,t}$ and $r_t$ use only edges in $\mathcal W_t$.
+Equation~\eqref{eq:causalscale} uses $r_j$ only for $j\leq t$.  Composition
+therefore yields Eq.~\eqref{eq:prefix}.  This property is verified in the
+artifact by changing a suffix and comparing every prefix score bit-for-bit.
+
+\noindent\textbf{Property 2 (bounded review budget).}
+Assume $T\geq B$ and every scale selects exactly $B$ windows.  Then
+\begin{equation}
+ B\leq |\widehat{\mathcal W}|\leq \min(T,B|H|).
+ \label{eq:budgetbound}
+\end{equation}
+The lower bound occurs when all scales agree; the upper bound occurs when their
+selected sets are disjoint.  Thus scale agreement automatically returns unused
+capacity rather than duplicating an alert.
+
+\noindent\textbf{Property 3 (monotone-transform invariance).}
+For any scale $h$, replacing all $c_t^{(h)}$ by
+$f_h(c_t^{(h)})$ for a strictly increasing function $f_h$ leaves
+$\mathcal S_h$, $p_t^{(h)}$, and the multiscale union unchanged, subject to the
+same deterministic tie rule.  The result follows because a strictly increasing
+map preserves pairwise order.  Rank fusion therefore requires order consistency,
+not cross-scale score calibration.
+
+\noindent\textbf{Property 4 (coverage-preserving reconstruction).}
+Incident clustering partitions $\widehat{\mathcal W}$ and does not discard a
+selected window.  Consequently, $R_{\rm win}$ and $R_{\rm epi}$ are identical
+before and after clustering, while the analyst queue satisfies
+$1\leq M\leq|\widehat{\mathcal W}|$ whenever the union is nonempty.  This
+separates detection coverage from presentation workload: $g$ and $q$ can change
+incident boundaries or ranks without retroactively changing selected-window
+recall.
+
+\subsection{Label-Free Parameter Freezing}
+
+The primary configuration is frozen as
+\begin{equation}
+ (\rho,K,H,B,g,q)=(\text{file},10,\{1,4\},20,2,3).
+ \label{eq:configuration}
+\end{equation}
+Each parameter has an operational interpretation.  File nodes represent the
+persistent objects through which many attack stages communicate; $K$ is the
+amount of simultaneous object support; $H$ specifies instantaneous and sustained
+evidence; $B$ is analyst capacity per scale; $g$ is temporal tolerance between
+selected windows; and $q$ determines how many strong windows support an incident
+rank.  The pipeline never searches these values against test labels.  The paper
+reports the complete top-$K$, scale, gap, and top-$q$ grids as post-hoc ablations,
+but the primary row remains Eq.~\eqref{eq:configuration} for every dataset and
+seed.  Using one shared configuration is important: it tests cross-dataset
+robustness rather than constructing a separate oracle for each collector.
+
+\subsection{Efficient and Coverage-Oriented Modes}
+
+The same evidence stream exposes two operational modes.  The \emph{efficient
+mode} retains only $\mathcal S_4$, producing exactly 20 windows before incident
+clustering.  It emphasizes sustained evidence and minimizes analyst workload.
+The \emph{coverage mode} uses Eq.~\eqref{eq:fusion}; its union admits between 20
+and 40 windows per dataset and preserves discoveries unique to either temporal
+scale.  No retraining or rescaling is needed to switch modes, so an organization
+can select the mode from analyst capacity rather than from hidden model
+parameters.
+
+\subsection{Node-Output Adapter}
+
+The primary interface consumes edge losses, but the reconstruction stages only
+require a timestamped set of anomaly values.  For a detector that exports one
+score $z_v$ and one native temporal location $\theta_v$ per node, we form
+\begin{equation}
+ r_t^{\mathrm{node}}=\frac{1}{k_t}
+ \sum_{i=1}^{k_t} z_{(i),t},\qquad
+ \{z_{(i),t}\}=\operatorname{sort}\{z_v:\theta_v=t\},
+ \label{eq:nodeadapter}
+\end{equation}
+where $k_t=\min(K,|\{v:\theta_v=t\}|)$ and
+$z_{(1),t}\geq z_{(2),t}\geq\cdots$.  The causal scales, fixed budgets,
+rank fusion, and incident construction then remain unchanged.  MAGIC and
+ThreaTrace export explicit time ranges; VELOX exports the chronologically
+ordered test-window index at which a node reaches its maximum loss, which is
+mapped back to the immutable timestamped test-file list.  Empty native windows
+receive zero evidence.  Neither node labels nor attack intervals participate in
+Eq.~\eqref{eq:nodeadapter} or any subsequent ranking decision.
+
+\begin{algorithm}[!t]
+\caption{Causal Multiscale Incident Reconstruction over a Closed Review Horizon}
+\label{alg:cmir}
+\begin{algorithmic}[1]
+\REQUIRE Ordered edge-loss windows $\mathcal{W}_{1:T}$; role $\rho$; $K$;
+scales $H$; budget $B$; gap $g$; incident top-score count $q$
+\FOR{$t=1$ to $T$}
+  \STATE Project incident edge losses to $a_{v,t}$ using Eq.~\eqref{eq:nodeevidence}
+  \STATE Compute $r_t$ from the $K$ strongest role nodes
+  \FOR{each $h\in H$}
+    \STATE Compute trailing score $c_t^{(h)}$ using Eq.~\eqref{eq:causalscale}
+  \ENDFOR
+\ENDFOR
+\FOR{each $h\in H$}
+  \STATE Rank $c_{1:T}^{(h)}$; store $\mathcal S_h$ and $p_t^{(h)}$
+\ENDFOR
+\STATE $\widehat{\mathcal W}\leftarrow\bigcup_h\mathcal S_h$
+\STATE Merge ordered selected windows whose index gap is at most $g$
+\STATE Score each incident using Eq.~\eqref{eq:incidentscore}
+\RETURN ranked incidents and the immutable per-window audit table
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Complexity and Auditability}
+
+Let $E$ be the number of scored edges and $V_t$ the role nodes in window $t$.
+Edge-to-node projection costs $O(E)$; sorting node evidence costs
+$O(\sum_t |V_t|\log|V_t|)$ (or $O(\sum_t |V_t|\log K)$ with a size-$K$ heap).
+Trailing means cost $O(T|H|)$ with prefix sums, scale ranking costs
+$O(|H|T\log T)$, and clustering costs $O(B|H|\log(B|H|))$.  The output records
+the edge-loss source, scale scores, ranks, selected scales, incident identifier,
+and frozen configuration.  Every reported decision can therefore be reproduced
+without rerunning detector training.
+
+\section{Experimental Methodology}
+\label{sec:setup}
+
+\subsection{Datasets and Protocol}
+
+Table~\ref{tab:datasets} summarizes the fixed test streams used by the incident
+layer.  A window is positive when its time interval overlaps a benchmark attack
+interval.  Several positive windows can belong to one attack episode; this
+distinction is essential because selecting one representative window can be
+sufficient to initiate investigation.
+
+\begin{table}[!t]
+\caption{Evaluation Datasets and Frozen Test Protocol}
+\label{tab:datasets}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.6pt}
+\begin{tabular}{lrrrr}
+\toprule
+Dataset & Test win. & Attack win. & Episodes & Seeds\\
+\midrule
+\dataset{CADETS-E3}     & 333 & 9 & 3 & 5\\
+\dataset{CLEARSCOPE-E3} & 161 & 4 & 1 & 5\\
+\dataset{THEIA-E3}      & 203 & 8 & 2 & 5\\
+\dataset{OPTC-H201}     & 247 & 9 & 1 & 5\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All five seeds use the same data split and reconstruction hyperparameters; only
+detector initialization and training randomness vary.  Validation-loss selection
+chooses epochs 20, 20, 20, 19, and 19 on OPTC-H201; analogous selected
+checkpoints are frozen for the other datasets.  OPTC-H201 is preprocessed into
+the same 272-dimensional ORTHRUS edge representation before training.  No
+ground-truth identifier or attack interval is a feature.
+
+\subsection{Cross-Detector Composition Protocol}
+
+We additionally train the PIDSMaker implementations of VELOX, MAGIC, and
+ThreaTrace on CLEARSCOPE-E3 with five seeds each.  Every model uses its native
+training and evaluation procedure and exports its epoch-11 node result.  The
+adapter in Eq.~\eqref{eq:nodeadapter} uses the same
+$K=10$, $H=\{1,4\}$, $B=20$, $g=2$, and $q=3$ as the primary experiment; no
+detector-specific search is performed.  MAGIC and ThreaTrace expose 161 and 162
+native time ranges, respectively.  VELOX exposes 768 finer-grained,
+chronologically ordered edge-loss windows.  Because native temporal units
+differ, episode recall and within-detector compression are the principal
+composition metrics; the table also reports each native window count and
+attack-window recall transparently.
+
+\subsection{Operating Modes and Metrics}
+
+We report two operating modes.  \emph{Scale-4} selects $B=20$ sustained-evidence
+windows and is the efficient configuration.  \emph{Multiscale union} combines
+scale 1 and scale 4 and is the coverage configuration.  Besides
+$R_{\mathrm{win}}$ and $R_{\mathrm{epi}}$, we report selected windows, resulting
+incidents, and
+\begin{equation}
+ C_{\mathrm{inc}}=1-\frac{M}{|\widehat{\mathcal W}|},
+ \label{eq:compression}
+\end{equation}
+the proportional reduction from selected windows to analyst-facing incidents
+after temporal merging.  Means are taken over five seeds.
+
+The comparison set is matched to the paper's downstream scope.  With the
+upstream detector and score traces fixed, we compare Top-1, Top-5, Top-10, and
+all-node aggregation; one- and four-window temporal scales; their multiscale
+union; and the exact uniform selector at the same realized budget.  These
+comparisons test whether each reconstruction module adds value without
+conflating that value with a change in detector training.  Native node-level
+metrics for the external detectors are reported separately in
+Table~\ref{tab:externaldetectors}.
+
+\subsection{Exact Fixed-Budget Random Baseline}
+
+For $T$ windows, budget $b$, and an episode occupying $a_q$ windows, the exact
+probability that a uniform $b$-subset hits episode $q$ is
+\begin{equation}
+ P_q(\mathrm{hit})=1-\frac{\binom{T-a_q}{b}}{\binom{T}{b}}.
+ \label{eq:randomhit}
+\end{equation}
+The expected random episode recall is
+$Q^{-1}\sum_qP_q(\mathrm{hit})$.  For the tail probability of covering at least
+the observed number of episodes, we count uniform fixed-size subsets by dynamic
+programming over the disjoint annotated episode sets; cross-dataset
+distributions are convolved under independent random selection in each dataset.
+This exact null preserves each method's actual union budget and avoids a
+favorable comparison to a smaller random budget.
+The resulting tail probabilities quantify departure from this specified
+uniform-budget selector; they are not a distribution-free guarantee for future
+deployments.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Four-Dataset Incident Recovery}
+
+Table~\ref{tab:headline} gives the primary five-seed results.  The multiscale
+union achieves 1.0 episode recall on every dataset and all 20 dataset--seed
+runs.  Its mean window recall is 0.889 on CADETS, 0.950 on CLEARSCOPE, 0.800 on
+THEIA, and 0.356 on OPTC.  The method therefore finds every annotated campaign
+while recovering additional within-episode evidence when the frozen detector
+supports it.
+
+\begin{table*}[!t]
+\caption{Five-Seed Incident Results.  ``Rnd. epi.'' Is the Expected Episode
+Recall of a Uniform Random Selection With the Same Per-Seed Budget; $p$ Is the
+Mean Per-Seed Exact Tail Probability.}
+\label{tab:headline}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.8pt}
+\begin{tabular}{llrrrrrrr}
+\toprule
+Dataset & Mode & $R_{\rm win}$ & $R_{\rm epi}$ & Sel. win. & Incidents & $C_{\rm inc}$ & Rnd. epi. & $p$\\
+\midrule
+\multirow{2}{*}{CADETS-E3}
+ & Scale-4    & 0.778 & 0.667 & 20.0 & 7.8  & 0.610 & 0.169 & 0.071910\\
+ & Multiscale & \textbf{0.889} & \textbf{1.000} & 30.4 & 14.8 & 0.513 & 0.248 & 0.012935\\
+\midrule
+\multirow{2}{*}{CLEARSCOPE-E3}
+ & Scale-4    & \textbf{0.950} & \textbf{1.000} & 20.0 & 7.0  & \textbf{0.650} & 0.415 & 0.414885\\
+ & Multiscale & \textbf{0.950} & \textbf{1.000} & 32.8 & 12.4 & 0.622 & 0.602 & 0.601833\\
+\midrule
+\multirow{2}{*}{THEIA-E3}
+ & Scale-4    & 0.600 & \textbf{1.000} & 20.0 & 6.6  & \textbf{0.670} & 0.338 & 0.105945\\
+ & Multiscale & \textbf{0.800} & \textbf{1.000} & 32.0 & 12.0 & 0.626 & 0.492 & 0.230701\\
+\midrule
+\multirow{2}{*}{OPTC-H201}
+ & Scale-4    & 0.289 & \textbf{1.000} & 20.0 & 8.2  & \textbf{0.590} & 0.538 & 0.538421\\
+ & Multiscale & \textbf{0.356} & \textbf{1.000} & 31.8 & 14.6 & 0.540 & 0.717 & 0.716645\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Figure~\ref{fig:datasetrecall} visualizes this dataset-wise result.  Scale 4 is
+already strong on sustained attacks: it reaches 0.95 window recall on CLEARSCOPE
+and detects every episode on CLEARSCOPE, THEIA, and OPTC.  The multiscale union
+adds the complementary short-scale windows needed to raise CADETS episode recall
+from 0.667 to 1.0 and increases window recall by 0.20 on THEIA and 0.067 on
+CADETS.  On OPTC, scale 4 raises mean attack-window recall from the scale-1 value
+of 0.156 to 0.289, and fusion raises it further to 0.356.
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{TDSC/fig1_dataset_recall.pdf}
+  \caption{Attack-window and attack-episode recall across four datasets.  Bars
+  summarize five independently trained seeds.  Multiscale fusion attains 100\%
+  episode recall on every dataset while improving or preserving temporal
+  coverage relative to scale 4.}
+  \label{fig:datasetrecall}
+\end{figure*}
+
+\subsection{Cross-Dataset Null Comparison and Workload}
+
+Aggregating all four datasets within each seed, scale 4 covers six of seven
+episodes ($R_{\mathrm{epi}}=0.857$), whereas multiscale covers seven of seven.
+The exact budget-matched joint tail probability is $0.002306$ for scale 4.  For
+multiscale it ranges from $0.001148$ to $0.001503$ because overlap between
+scales changes the union budget by seed.  Figure~\ref{fig:random} compares observed and random
+coverage, and Table~\ref{tab:crossdataset} reports the cross-dataset summary.
+
+\begin{table}[!t]
+\caption{Cross-Dataset Five-Seed Summary. Joint $p$ Is the Mean Exact Per-Seed
+Tail Probability Under the Budget-Matched Null.}
+\label{tab:crossdataset}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+Mode & $R_{\rm win}$ & $R_{\rm epi}$ & Sel. & Inc. & $C_{\rm inc}$ & Joint $p$\\
+\midrule
+Scale-4 & 0.607 & 0.857 & 80.0 & 29.6 & \textbf{0.630} & 0.002306\\
+Multiscale & \textbf{0.713} & \textbf{1.000} & 127.0 & 53.8 & 0.576 & \textbf{0.001289}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth]{TDSC/fig2_observed_vs_random.pdf}
+  \caption{Observed episode recovery versus the exact uniform fixed-budget null.
+  The advantage persists after each method is charged its actual union budget.}
+  \label{fig:random}
+\end{figure}
+
+The fixed budget is also operationally meaningful.  Across four datasets,
+scale 4 selects exactly 80 windows per seed and condenses them to 29.6 incidents;
+multiscale selects 124--130 union windows and condenses them to 49--60 incidents.
+Figure~\ref{fig:budget} shows that the additional multiscale coverage remains a
+compact queue after clustering.  An operator can therefore choose the efficient
+scale-4 mode or the coverage-oriented multiscale mode without changing detector
+training.
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{TDSC/fig3_budget_and_compression.pdf}
+  \caption{Selection budget and incident compression.  Temporal clustering
+  consistently reduces the number of analyst-facing items; scale 4 gives the
+  smallest queue, while multiscale spends additional budget for complete episode
+  coverage.}
+  \label{fig:budget}
+\end{figure*}
+
+\subsection{Stability Across Training Seeds}
+
+The dataset-level conclusions reproduce across all five detector trainings.
+For multiscale fusion, every seed recovers all seven cross-dataset episodes.
+Cross-dataset attack-window recall is 21/30 or 22/30 per seed, and incident counts
+range from 49 to 60.  Scale 4 covers six of seven episodes for every seed and
+18--19 of 30 attack windows.  Figure~\ref{fig:stability} makes this stability
+visible and confirms that the result is not driven by one favorable checkpoint.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth]{TDSC/fig4_seed_stability.pdf}
+  \caption{Five-seed stability of the cross-dataset results.  Multiscale episode
+  recall remains 1.0 for every independently trained model instance.}
+  \label{fig:stability}
+\end{figure}
+
+\subsection{Composition With Additional Upstream Detectors}
+
+Table~\ref{tab:externalcomposition} evaluates the node-output adapter without
+changing any \method{} parameter.  ThreaTrace recovers the CLEARSCOPE attack
+episode in all five seeds, reaches mean attack-window recall 0.700, and places
+the attack incident at ranks 1--3.  VELOX also recovers the episode in all five
+seeds.  Its finer 768-window stream yields lower within-episode window recall
+and a larger queue, but demonstrates stable coverage under the same absolute
+Top-20-per-scale budget.  Together, the two detectors provide ten independent
+cross-detector runs with complete episode recovery.
+
+The exact native-budget null further separates observed coverage from the
+opportunity created by each detector's temporal partition.  ThreaTrace raises
+episode recall from a random expectation of 0.565 to 1.0; under independent
+uniform selection across the five seeded runs, the probability of covering all
+five episode instances is 0.0575.  VELOX also reaches 1.0, while its broad 33-window attack
+interval and 36--37-window union produce a higher random expectation of 0.806
+and a five-seed tail probability of 0.339.  Thus the VELOX result establishes
+interface compatibility, while ThreaTrace supplies the stronger prioritization
+result.
+
+MAGIC attains high AUC but low precision at its native operating point, and its
+node-output temporal projection does not place the attack interval in the fixed
+multiscale budget.  This result identifies an interface requirement: successful
+fixed-budget reconstruction needs anomaly scores whose temporal projection
+concentrates evidence near the attack interval; global node separability alone
+is insufficient.  The unchanged configuration therefore reveals both successful
+transfer and a concrete failure mode.
+
+\begin{table*}[!t]
+\caption{Five-Seed Node-Output Composition on CLEARSCOPE-E3.  ``Rnd.'' Is the
+Expected Episode Recall of Uniform Selection With the Same Native Budget; $p_5$
+Is the Exact Probability of Covering at Least the Observed Number of Episodes
+Across Five Seeds.}
+\label{tab:externalcomposition}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.8pt}
+\begin{tabular}{lrrrrrrrrr}
+\toprule
+Upstream & Win. & Succ. & $R_{\rm win}$ & $R_{\rm epi}$ & Rnd. & $p_5$ & Sel. & Inc. & $C_{\rm inc}$\\
+\midrule
+MAGIC      & 161 & 0/5 & 0.000 & 0.000 & 0.519 & 1.0000 & 26.8 & 7.6  & 0.729\\
+ThreaTrace & 162 & 5/5 & 0.700 & 1.000 & 0.565 & 0.0575 & 30.2 & 11.6 & 0.616\\
+VELOX      & 768 & 5/5 & 0.036 & 1.000 & 0.806 & 0.3391 & 36.4 & 27.2 & 0.253\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The best attack-incident ranks across seeds are 3, 2, 1, 2, and 2 for
+ThreaTrace and 27, 20, 20, 3, and 25 for VELOX.  Absolute window and incident
+counts are interpreted within each detector's native temporal resolution.
+
+\subsection{Upstream Node-Detection Characteristics}
+
+Table~\ref{tab:externaldetectors} reports the upstream node-level behavior
+before reconstruction.  MAGIC combines high AUC with complete node recall, but
+its native operating point emits 42,646 false positives on average.  ThreaTrace
+also recalls every positive node and retains ranking information, while its
+default threshold marks the full node population.  VELOX detects one of 41
+positive nodes per seed at its native operating point.  These distinct score
+profiles show that the composition experiment does not depend on a shared
+node-classification operating regime; it evaluates whether the temporal score
+organization remains useful to the fixed downstream interface.
+
+\begin{table*}[!t]
+\caption{Native Upstream Node-Level Performance on CLEARSCOPE-E3 (Mean $\pm$
+Sample Standard Deviation Over Five Seeds).}
+\label{tab:externaldetectors}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.7pt}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Upstream & AP & AUC & Precision & Recall & FPR & MCC & Mean FP\\
+\midrule
+MAGIC & $0.01654\pm0.01179$ & $0.96796\pm0.02314$ & $0.00101\pm0.00024$ & $1.000\pm0.000$ & $0.38295\pm0.10525$ & $0.02497\pm0.00503$ & 42646.4\\
+ThreaTrace & $0.04181\pm0.08417$ & $0.87961\pm0.07989$ & $0.00037\pm0.00000$ & $1.000\pm0.000$ & $1.00000\pm0.00000$ & $0.00000\pm0.00000$ & 111362.0\\
+VELOX & $0.000470\pm0.000033$ & $0.32953\pm0.01170$ & $0.000376\pm0.000172$ & $0.02439\pm0.00000$ & $0.04037\pm0.04578$ & $-0.00065\pm0.00284$ & 4495.2\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Reconstruction Overhead}
+
+Table~\ref{tab:runtime} separates one-time result loading from the core
+reconstruction stages.  On the 161--162-window streams, causal scoring, fusion,
+and incident reconstruction finish in about 5.5--5.7 ms.  The 768-window VELOX
+stream requires 28.0 ms.  Incident formation itself remains below 0.5 ms in
+every configuration.  These measurements exclude upstream detector inference
+and characterize the marginal reconstruction cost rather than compare detector
+inference speed.  They show that post-inference reconstruction is lightweight
+on the evaluated host.
+
+\begin{table}[!t]
+\caption{Post-Inference CMIR Runtime in Milliseconds (Five-Seed Mean; Core
+Stages Averaged Over 100 Repetitions).}
+\label{tab:runtime}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.0pt}
+\begin{tabular}{lrrrrr}
+\toprule
+Upstream & Load & Score & Fusion & Incident & Core\\
+\midrule
+MAGIC      & 357.43 & 4.91 & 0.60 & 0.17 & $5.68\pm0.24$\\
+ThreaTrace & 461.17 & 4.69 & 0.60 & 0.22 & $5.51\pm0.23$\\
+VELOX      & 506.38 & 24.63 & 2.90 & 0.48 & $28.01\pm1.09$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{OPTC-H201: Weak Node Signal, Strong Episode Recovery}
+
+OPTC-H201 is the most demanding node-ranking setting.  The frozen ORTHRUS runs
+contain 1,437,934 evaluated nodes and 2,905 positive nodes.  Table~\ref{tab:optcnode}
+shows mean node AP of 0.0139 and recall@100 of 0.00110, yet scale 4 detects the
+attack episode in every seed and multiscale also attains 1.0 episode recall.
+This contrast demonstrates the value of temporal collective evidence: the method
+does not require every malicious entity to occupy a high global node rank before
+recovering the incident.
+
+\begin{table}[!t]
+\caption{Frozen ORTHRUS Node Ranking on OPTC-H201}
+\label{tab:optcnode}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.8pt}
+\begin{tabular}{crrrrr}
+\toprule
+Seed & Epoch & AP & AUC & MCC & Recall@100\\
+\midrule
+0 & 20 & 0.016071 & 0.738177 & 0.005754 & 0.001377\\
+1 & 20 & 0.014058 & 0.736465 & 0.013940 & 0.001033\\
+2 & 20 & 0.013431 & 0.736268 & 0.006920 & 0.001033\\
+3 & 19 & 0.014085 & 0.737299 & 0.006078 & 0.001033\\
+4 & 19 & 0.011975 & 0.735647 & 0.009211 & 0.001033\\
+\midrule
+Mean & -- & 0.013924 & 0.736771 & 0.008381 & 0.001102\\
+SD & -- & 0.001474 & 0.000983 & 0.003388 & 0.000154\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[!t]
+  \centering
+  \subfloat[Temporal-scale gain.]{\includegraphics[width=0.47\textwidth]{TDSC/fig5_optc_scale_gain.pdf}%
+  \label{fig:optcscale}}
+  \hfil
+  \subfloat[Frozen node-level signal.]{\includegraphics[width=0.47\textwidth]{TDSC/fig6_optc_node_signal.pdf}%
+  \label{fig:optcnode}}
+  \caption{OPTC-H201 analysis.  Scale 4 substantially strengthens window
+  coverage relative to scale 1, while incident recovery succeeds despite a
+  difficult global node-ranking problem.}
+  \label{fig:optc}
+\end{figure*}
+
+\section{Ablation and Sensitivity Analysis}
+\label{sec:ablation}
+
+\subsection{Collective Evidence}
+
+Table~\ref{tab:collective} compares the top-$K$ statistic with an all-node mean
+at scale 4.  No single aggregation dominates every collector because attack
+density differs across platforms.  The frozen Top-10 setting provides the most
+consistent result: it recovers 91/150 attack windows and 30/35 episode instances
+pooled across all dataset--seed runs.  The all-node mean recovers 28/150 windows
+and 10/35 episode instances; its success on CLEARSCOPE is offset by zero episode
+recovery on THEIA and OPTC.  The post-hoc ablation therefore supports Top-10 as
+a robust shared setting rather than a dataset-specific oracle.
+
+\begin{table*}[!t]
+\caption{Collective-Evidence Ablation at Scale 4 (Mean $\pm$ Sample Standard
+Deviation Over Five Seeds).  ``Succ.'' Counts Seeds Recovering at Least One
+Attack Episode.}
+\label{tab:collective}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4.0pt}
+\begin{tabular}{llrrrr}
+\toprule
+Dataset & Aggregation & $R_{\rm win}$ & $R_{\rm epi}$ & Succ. & Incidents\\
+\midrule
+\multirow{4}{*}{CADETS-E3}
+ & Top-1    & $0.711\pm0.061$ & 0.667 & 5 & 7.0\\
+ & Top-5    & $0.778\pm0.000$ & 0.667 & 5 & 6.8\\
+ & Top-10   & $0.778\pm0.000$ & 0.667 & 5 & 7.8\\
+ & All-mean & $0.178\pm0.061$ & 0.333 & 5 & 5.6\\
+\midrule
+\multirow{4}{*}{CLEARSCOPE-E3}
+ & Top-1    & $0.000\pm0.000$ & 0.000 & 0 & 5.8\\
+ & Top-5    & $0.000\pm0.000$ & 0.000 & 0 & 7.0\\
+ & Top-10   & $0.950\pm0.112$ & 1.000 & 5 & 7.0\\
+ & All-mean & $1.000\pm0.000$ & 1.000 & 5 & 5.6\\
+\midrule
+\multirow{4}{*}{THEIA-E3}
+ & Top-1    & $0.800\pm0.068$ & 1.000 & 5 & 4.6\\
+ & Top-5    & $0.625\pm0.000$ & 1.000 & 5 & 6.4\\
+ & Top-10   & $0.600\pm0.056$ & 1.000 & 5 & 6.6\\
+ & All-mean & $0.000\pm0.000$ & 0.000 & 0 & 5.4\\
+\midrule
+\multirow{4}{*}{OPTC-H201}
+ & Top-1    & $0.156\pm0.099$ & 0.800 & 4 & 9.0\\
+ & Top-5    & $0.178\pm0.061$ & 1.000 & 5 & 8.8\\
+ & Top-10   & $0.289\pm0.061$ & 1.000 & 5 & 8.2\\
+ & All-mean & $0.000\pm0.000$ & 0.000 & 0 & 8.4\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\columnwidth]{TDSC/fig7_collective_evidence_ablation.pdf}
+  \caption{Collective-evidence ablation.  Sparse top-$K$ aggregation is markedly
+  more robust than averaging the full active-node population.}
+  \label{fig:collective}
+\end{figure}
+
+\subsection{Multiscale Fusion}
+
+Figure~\ref{fig:fusionablation} compares individual scales and their union.
+Scale 4 increases CLEARSCOPE window recall from 0.45 to 0.95 relative to scale 1,
+raises CADETS window recall from 0.711 to 0.778, and nearly doubles OPTC window
+recall from 0.156 to 0.289.  Scale 1 remains complementary: its union with scale
+4 restores the third CADETS attack episode and raises THEIA window recall from
+0.60 to 0.80.  This explains why the efficient and coverage modes occupy
+different useful operating points rather than representing redundant parameter
+settings.
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{TDSC/fig8_multiscale_fusion_ablation.pdf}
+  \caption{Temporal-fusion ablation across scales 1 and 4.  Sustained evidence
+  supplies the largest single-scale gain, while the union recovers complementary
+  short-lived behavior and all attack episodes.}
+  \label{fig:fusionablation}
+\end{figure*}
+
+\subsection{Incident Reconstruction Sensitivity}
+
+The final module has two interpretable controls: maximum gap $g$ and top-score
+count $q$.  Figure~\ref{fig:sensitivity} reports the complete grid over four
+datasets and five seeds.  Increasing $g$ merges nearby evidence and reduces the
+review queue; $q$ controls whether an incident rank reflects its peak or several
+supporting windows.  The frozen choice $(g,q)=(2,3)$ consistently compresses the
+selected union while retaining the episode coverage established before
+clustering.  Because clustering never removes a selected window, incident
+construction preserves $R_{\mathrm{win}}$ and $R_{\mathrm{epi}}$ by design.
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{TDSC/fig9_incident_reconstruction_sensitivity.pdf}
+  \caption{Incident-reconstruction sensitivity to temporal gap and incident
+  score aggregation.  The primary setting $g=2$, $q=3$ offers a stable balance
+  between incident compression and concise ranking.}
+  \label{fig:sensitivity}
+\end{figure*}
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Operational Interpretation}
+
+\method{} provides two deployable choices from the same frozen detector.
+Scale 4 is appropriate when analyst capacity is tight: it admits 20 windows per
+dataset and compresses them by 63\% in the cross-dataset aggregate.  Multiscale
+fusion is appropriate when campaign coverage is primary: it achieves complete
+episode recall across all 20 runs and still compresses the union by 57.6\%.
+Ranks, selected scales, and incident membership are explicit, allowing an
+analyst to understand why an item entered the queue.
+The node-output experiment adds a complementary deployment path: the same
+reconstruction parameters recover the CLEARSCOPE episode in every VELOX and
+ThreaTrace seed, allowing \method{} to operate behind an existing scorer rather
+than replacing it.  Under the exact native-budget null, ThreaTrace improves
+episode recall from an expectation of 0.565 to 1.0, with five-seed tail
+probability 0.0575.  VELOX provides consistent interface-level episode coverage
+under a much finer temporal partition, while its larger attack opportunity is
+made explicit by the corresponding null expectation of 0.806.
+
+\subsection{Why the Gains Are Complementary}
+
+The experiments identify three distinct effects.  Top-$K$ aggregation suppresses
+the mass of ordinary active objects while preserving coordinated evidence.
+Causal scale 4 accumulates weak behavior that is not individually extreme.
+Scale 1 adds sharp transient behavior, and incident clustering converts both
+signals into analyst-facing units.  The combined method succeeds on OPTC even
+when global node ranking is weak, while retaining near-complete temporal coverage
+on CLEARSCOPE.  This diversity is the central advantage of the reconstruction
+layer.
+
+\subsection{Scope and Future Deployment}
+
+The primary edge-output study uses four public provenance benchmarks with five
+independent trainings per dataset, and the composition study adds fifteen
+CLEARSCOPE runs from three upstream detector architectures.  These experiments
+provide evidence across operating systems, attack structures, retraining
+variation, and detector interfaces.  The composition experiment establishes
+compatibility with three score formats on CLEARSCOPE; extending this controlled
+comparison across datasets is a natural next step.  Likewise,
+OPTC contains one annotated attack episode spread across nine windows; its
+episode metric is therefore interpreted together with window recall and the
+exact budget-matched null.  A production deployment can apply the same score
+interface at the end of fixed review horizons, but live analyst studies and
+non-DARPA environments remain future work.  Runtime measurements depend on the
+host and storage stack;
+we therefore separate one-time loading from the repeatedly measured core
+stages.  Across the external streams, core reconstruction requires only
+5.51--28.01 ms, and incident formation itself remains below 0.5 ms.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper introduced \method{}, a strictly causal multiscale scorer with a
+fixed-budget reconstruction layer that turns
+frozen edge anomalies into a compact incident queue.  Role-aware collective
+evidence, trailing temporal scales, rank-percentile fusion, and deterministic
+incident clustering address complementary failure modes without changing the
+underlying detector.  Across CADETS-E3, CLEARSCOPE-E3, THEIA-E3, and OPTC-H201,
+the multiscale method recovered all 35 dataset--seed episode instances in 20
+independently trained runs and improved mean attack-window recall to 0.713.  The
+mean exact cross-dataset budget-matched tail probability was approximately
+$1.3\times10^{-3}$,
+and clustering reduced 127 selected windows to 53.8 incidents per seed.  The
+efficient scale-4 mode provides a second strong operating point with a 29.6-item
+queue and 0.857 episode recall.  Without detector-specific tuning, the
+node-output adapter additionally recovers the CLEARSCOPE episode in all five
+VELOX and all five ThreaTrace runs.  ThreaTrace improves on the exact random
+episode-recall expectation of 0.565 and attains a five-seed tail probability of
+0.0575; the budget-matched VELOX null transparently quantifies its broader
+attack opportunity.  Core reconstruction completes in 5.51--28.01 ms across
+the three external streams.  On the evaluated traces, these results show that
+forward-only collective scoring and fixed-budget reconstruction convert
+high-volume provenance anomaly streams into reproducible,
+investigation-ready incident queues.
+
+\section*{Artifact Availability}
+
+The artifact records the selected checkpoint for every seed, immutable edge-loss
+directories, scale-specific window tables, multiscale union manifests, incident
+membership, post-hoc label evaluations, exact random-budget calculations, and
+the external-detector adapter manifests and outputs.  External artifacts include
+per-seed detector metrics, component runtimes over 100 repetitions, and the
+native-budget random-baseline tables.  The artifact also includes the scripts
+that regenerate all thirteen figures and paper tables.  The regression suite
+includes a prefix-invariance test: changing a future window cannot change any
+earlier raw or causal score.
+
+\begin{thebibliography}{99}
+
+\bibitem{king2003backtracking}
+S.~T. King and P.~M. Chen, ``Backtracking intrusions,'' in \emph{Proc. 19th ACM
+Symp. Operating Systems Principles (SOSP)}, 2003, pp. 223--236.
+
+\bibitem{manzoor2016streamspot}
+E.~Manzoor, S.~M. Milajerdi, and L.~Akoglu, ``Fast memory-efficient anomaly
+detection in streaming heterogeneous graphs,'' in \emph{Proc. 22nd ACM SIGKDD
+Int. Conf. Knowledge Discovery and Data Mining (KDD)}, 2016, pp. 1035--1044.
+
+\bibitem{han2020unicorn}
+X.~Han, T.~Pasquier, A.~Bates, J.~Mickens, and M.~Seltzer, ``UNICORN: Runtime
+provenance-based detector for advanced persistent threats,'' in \emph{Proc. Netw.
+Distrib. Syst. Security Symp. (NDSS)}, 2020.
+
+\bibitem{jia2024magic}
+Z.~Jia, Y.~Xiong, Y.~Nan, Y.~Zhang, J.~Zhao, and M.~Wen, ``MAGIC: Detecting
+advanced persistent threats via masked graph representation learning,'' in
+\emph{Proc. 33rd USENIX Security Symp.}, 2024, pp. 5197--5214.
+
+\bibitem{wang2022threatrace}
+S.~Wang, Z.~Wang, T.~Zhou, H.~Sun, X.~Yin, D.~Han, H.~Zhang, X.~Shi, and
+J.~Yang, ``ThreaTrace: Detecting and tracing host-based threats in node level
+through provenance graph learning,'' \emph{IEEE Trans. Inf. Forensics Security},
+vol.~17, pp. 3972--3987, 2022, doi: 10.1109/TIFS.2022.3208815.
+
+\bibitem{jiang2025orthrus}
+B.~Jiang, T.~Bilot, N.~El Madhoun, K.~Al Agha, A.~Zouaoui, S.~Iqbal, X.~Han,
+and T.~Pasquier, ``ORTHRUS: Achieving high quality of attribution in
+provenance-based intrusion detection systems,'' in \emph{Proc. 34th USENIX
+Security Symp.}, 2025.
+
+\bibitem{hossain2017sleuth}
+M.~N. Hossain, S.~M. Milajerdi, J.~Wang, B.~Eshete, R.~Gjomemo, R.~Sekar,
+S.~Stoller, and V.~N. Venkatakrishnan, ``SLEUTH: Real-time attack scenario
+reconstruction from COTS audit data,'' in \emph{Proc. 26th USENIX Security
+Symp.}, 2017, pp. 487--504.
+
+\bibitem{milajerdi2019holmes}
+S.~M. Milajerdi, B.~Eshete, R.~Gjomemo, and V.~N. Venkatakrishnan, ``HOLMES:
+Real-time APT detection through correlation of suspicious information flows,''
+in \emph{Proc. IEEE Symp. Security and Privacy (S\&P)}, 2019, pp. 1137--1152.
+
+\bibitem{milajerdi2019poirot}
+S.~M. Milajerdi, R.~Gjomemo, B.~Eshete, R.~Sekar, and V.~N. Venkatakrishnan,
+``POIROT: Aligning attack behavior with kernel audit records for cyber threat
+hunting,'' in \emph{Proc. ACM SIGSAC Conf. Computer and Communications Security
+(CCS)}, 2019, pp. 1795--1812.
+
+\bibitem{hassan2019nodoze}
+W.~U. Hassan, S.~Guo, D.~Li, Z.~Chen, K.~Jee, Z.~Li, and A.~Bates, ``NoDoze:
+Combatting threat alert fatigue with automated provenance triage,'' in
+\emph{Proc. Netw. Distrib. Syst. Security Symp. (NDSS)}, 2019.
+
+\bibitem{bates2015lpm}
+A.~Bates, D.~J. Tian, K.~R.~B. Butler, and T.~Moyer, ``Trustworthy whole-system
+provenance for the Linux OS,'' in \emph{Proc. 24th USENIX Security Symp.}, 2015,
+pp. 319--334.
+
+\bibitem{pasquier2017camflow}
+T.~Pasquier, J.~Han, T.~Moyer, A.~Bates, O.~Hermant, D.~Eyers, J.~Bacon, and
+M.~Seltzer, ``Practical whole-system provenance capture,'' in \emph{Proc. ACM
+Symp. Cloud Computing (SoCC)}, 2017, pp. 405--418.
+
+\bibitem{muniswamy2006pass}
+K.-K. Muniswamy-Reddy, D.~A. Holland, U.~Braun, and M.~Seltzer,
+``Provenance-aware storage systems,'' in \emph{Proc. USENIX Annu. Tech. Conf.
+(ATC)}, 2006, pp. 43--56.
+
+\bibitem{pasquier2017managed}
+T.~F.~J.-M. Pasquier, J.~Singh, D.~Eyers, and J.~Bacon, ``CamFlow: Managed
+data-sharing for cloud services,'' \emph{IEEE Trans. Cloud Computing}, vol.~5,
+no.~3, pp. 472--484, 2017.
+
+\bibitem{ma2018kernel}
+S.~Ma, J.~Zhai, Y.~Kwon, K.~H. Lee, X.~Zhang, G.~Ciocarlie, A.~Gehani,
+V.~Yegneswaran, D.~Xu, and S.~Jha, ``Kernel-supported cost-effective audit
+logging for causality tracking,'' in \emph{Proc. USENIX Annu. Tech. Conf.
+(ATC)}, 2018, pp. 241--254.
+
+\bibitem{paccagnella2020custos}
+R.~Paccagnella, P.~Datta, W.~U. Hassan, A.~Bates, C.~W. Fletcher, A.~Miller,
+and D.~Tian, ``Custos: Practical tamper-evident auditing of operating systems
+using trusted execution,'' in \emph{Proc. Netw. Distrib. Syst. Security Symp.
+(NDSS)}, 2020.
+
+\bibitem{inam2022faust}
+M.~A. Inam, A.~Goyal, J.~Liu, J.~Mink, N.~Michael, S.~Gaur, A.~Bates, and
+W.~U. Hassan, ``FAuST: Striking a bargain between forensic auditing's security
+and throughput,'' in \emph{Proc. 38th Annu. Computer Security Applications Conf.
+(ACSAC)}, 2022, pp. 813--826.
+
+\bibitem{han2021sigl}
+X.~Han, X.~Yu, T.~Pasquier, D.~Li, J.~Rhee, J.~Mickens, M.~Seltzer, and
+H.~Chen, ``SIGL: Securing software installations through deep graph learning,''
+in \emph{Proc. 30th USENIX Security Symp.}, 2021, pp. 2345--2362.
+
+\bibitem{xie2020pagoda}
+Y.~Xie, D.~Feng, Y.~Hu, Y.~Li, S.~Sample, and D.~D.~E. Long, ``PAGODA: A
+hybrid approach to enable efficient real-time provenance based intrusion
+detection in big data environments,'' \emph{IEEE Trans. Dependable Secure
+Comput.}, vol.~17, no.~6, pp. 1283--1296, 2020.
+
+\bibitem{liu2019log2vec}
+F.~Liu, Y.~Wen, D.~Zhang, X.~Jiang, X.~Xing, and D.~Meng, ``Log2Vec: A
+heterogeneous graph embedding based approach for detecting cyber threats within
+enterprise,'' in \emph{Proc. ACM SIGSAC Conf. Computer and Communications
+Security (CCS)}, 2019, pp. 1777--1794.
+
+\bibitem{wang2020yawyd}
+Q.~Wang, W.~U. Hassan, D.~Li, K.~Jee, X.~Yu, K.~Zou, J.~Rhee, Z.~Chen,
+W.~Cheng, C.~A. Gunter, and H.~Chen, ``You are what you do: Hunting stealthy
+malware via data provenance analysis,'' in \emph{Proc. Netw. Distrib. Syst.
+Security Symp. (NDSS)}, 2020.
+
+\bibitem{alsaheel2021atlas}
+A.~Alsaheel, Y.~Nan, S.~Ma, L.~Yu, G.~Walkup, Z.~B. Celik, X.~Zhang, and
+D.~Xu, ``ATLAS: A sequence-based learning approach for attack investigation,''
+in \emph{Proc. 30th USENIX Security Symp.}, 2021, pp. 3005--3022.
+
+\bibitem{ma2016protracer}
+S.~Ma, X.~Zhang, and D.~Xu, ``ProTracer: Towards practical provenance tracing
+by alternating between logging and tainting,'' in \emph{Proc. Netw. Distrib.
+Syst. Security Symp. (NDSS)}, 2016.
+
+\bibitem{ma2017mpi}
+S.~Ma, J.~Zhai, F.~Wang, K.~H. Lee, X.~Zhang, and D.~Xu, ``MPI: Multiple
+perspective attack investigation with semantic aware execution partitioning,''
+in \emph{Proc. 26th USENIX Security Symp.}, 2017, pp. 1111--1128.
+
+\bibitem{kwon2018mci}
+Y.~Kwon, F.~Wang, W.~Wang, K.~H. Lee, W.-C. Lee, S.~Ma, X.~Zhang, D.~Xu,
+S.~Jha, G.~Ciocarlie, A.~Gehani, and V.~Yegneswaran, ``MCI: Modeling-based
+causality inference in audit logging for attack investigation,'' in \emph{Proc.
+Netw. Distrib. Syst. Security Symp. (NDSS)}, 2018.
+
+\bibitem{hassan2018winnower}
+W.~U. Hassan, N.~Aguse, M.~Lemay, T.~Moyer, and A.~Bates, ``Towards scalable
+cluster auditing through grammatical inference over provenance graphs,'' in
+\emph{Proc. Netw. Distrib. Syst. Security Symp. (NDSS)}, 2018.
+
+\bibitem{hassan2020rapsheet}
+W.~U. Hassan, A.~Bates, and D.~Marino, ``Tactical provenance analysis for
+endpoint detection and response systems,'' in \emph{Proc. IEEE Symp. Security
+and Privacy (S\&P)}, 2020, pp. 1172--1189.
+
+\bibitem{lee2013loggc}
+K.~H. Lee, X.~Zhang, and D.~Xu, ``LogGC: Garbage collecting audit log,'' in
+\emph{Proc. ACM SIGSAC Conf. Computer and Communications Security (CCS)}, 2013,
+pp. 1005--1016.
+
+\bibitem{pei2016hercule}
+K.~Pei, Z.~Gu, B.~Saltaformaggio, S.~Ma, F.~Wang, Z.~Zhang, L.~Si, X.~Zhang,
+and D.~Xu, ``HERCULE: Attack story reconstruction via community discovery on
+correlated log graph,'' in \emph{Proc. 32nd Annu. Computer Security Applications
+Conf. (ACSAC)}, 2016, pp. 583--595.
+
+\bibitem{inam2023sok}
+M.~Inam, Y.~Chen, A.~Goyal, J.~Liu, J.~Mink, N.~Michael, S.~Gaur, A.~Bates,
+and W.~U. Hassan, ``SoK: History is a vast early warning system: Auditing the
+provenance of system intrusions,'' in \emph{Proc. IEEE Symp. Security and Privacy
+(S\&P)}, 2023, pp. 307--325.
+
+\bibitem{goyal2023mimicry}
+A.~Goyal, X.~Han, A.~Bates, and G.~Wang, ``Sometimes, you aren't what you do:
+Mimicry attacks against provenance graph host intrusion detection systems,'' in
+\emph{Proc. Netw. Distrib. Syst. Security Symp. (NDSS)}, 2023.
+
+\bibitem{mikolov2013word2vec}
+T.~Mikolov, I.~Sutskever, K.~Chen, G.~S. Corrado, and J.~Dean, ``Distributed
+representations of words and phrases and their compositionality,'' in \emph{Proc.
+Advances in Neural Information Processing Systems (NeurIPS)}, 2013,
+pp. 3111--3119.
+
+\bibitem{grover2016node2vec}
+A.~Grover and J.~Leskovec, ``node2vec: Scalable feature learning for networks,''
+in \emph{Proc. 22nd ACM SIGKDD Int. Conf. Knowledge Discovery and Data Mining
+(KDD)}, 2016, pp. 855--864.
+
+\bibitem{hamilton2017graphsage}
+W.~L. Hamilton, R.~Ying, and J.~Leskovec, ``Inductive representation learning
+on large graphs,'' in \emph{Proc. Advances in Neural Information Processing
+Systems (NeurIPS)}, 2017, pp. 1024--1034.
+
+\bibitem{velickovic2018gat}
+P.~Veli\v{c}kovi\'c, G.~Cucurull, A.~Casanova, A.~Romero, P.~Li\`o, and
+Y.~Bengio, ``Graph attention networks,'' in \emph{Proc. Int. Conf. Learning
+Representations (ICLR)}, 2018.
+
+\bibitem{rossi2020tgn}
+E.~Rossi, B.~Chamberlain, F.~Frasca, D.~Eynard, F.~Monti, and M.~Bronstein,
+``Temporal graph networks for deep learning on dynamic graphs,''
+arXiv:2006.10637, 2020.
+
+\bibitem{liu2026hades}
+Q.~Liu, K.~Bao, W.~U. Hassan, and V.~Hagenmeyer, ``HADES: Detecting and
+investigating Active Directory attacks via whole network provenance analytics,''
+\emph{IEEE Trans. Dependable Secure Comput.}, vol.~23, no.~1, pp. 936--953,
+2026.
+
+\bibitem{darpaTC}
+Defense Advanced Research Projects Agency, ``Transparent Computing,'' program
+and evaluation datasets, 2015--2019. [Online]. Available:
+\url{https://www.darpa.mil/research/programs/transparent-computing}
+
+\end{thebibliography}
+
+\end{document}
